@@ -29,8 +29,21 @@ enum DisplayFrame : uint8_t {
     FRAME_OVERVIEW = 1,
     FRAME_TOPSTATS = 2,
     FRAME_MAP = 3,
-    FRAME_EMERGENCY_BASE = 4, // FRAME_EMERGENCY_BASE..+3 for up to 4 emergency aircraft
+    FRAME_RADAR = 4,
+    FRAME_EMERGENCY_BASE = 5, // FRAME_EMERGENCY_BASE..+3 for up to 4 emergency aircraft
 };
+
+// Flags to enable/disable individual carousel screens. Set to false to skip
+// a screen when advancing through the frame sequence in main.cpp.
+constexpr bool FRAME_SYSINFO_ENABLED = true;
+constexpr bool FRAME_OVERVIEW_ENABLED = true;
+constexpr bool FRAME_TOPSTATS_ENABLED = true;
+constexpr bool FRAME_MAP_ENABLED = true;
+constexpr bool FRAME_RADAR_ENABLED = true;
+
+// While FRAME_RADAR is active, poll ADS-B data faster so aircraft motion is
+// visible on the sweep. Restored to the normal interval on any other frame.
+constexpr unsigned long UPDATE_ADSBS_INTERVAL_RADAR_MILLISECS = 5000;
 
 void display_init();
 bool display_ready();

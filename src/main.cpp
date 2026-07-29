@@ -55,6 +55,41 @@ String _locationCode = "";
 #define UPDATE_ADSBS_INTERVAL_MILLISECS 30000     // Update every 30 seconds
 #define UPDATE_TIME_INTERVAL_MILLISECS 900        // Update every <1sec
 
+// Returns whether a given base carousel frame (non-emergency) is enabled per
+// the flags in display.h.
+bool isFrameEnabled(byte frame)
+{
+  switch (frame)
+  {
+  case FRAME_SYSINFO: return FRAME_SYSINFO_ENABLED;
+  case FRAME_OVERVIEW: return FRAME_OVERVIEW_ENABLED;
+  case FRAME_TOPSTATS: return FRAME_TOPSTATS_ENABLED;
+  case FRAME_MAP: return FRAME_MAP_ENABLED;
+  case FRAME_RADAR: return FRAME_RADAR_ENABLED;
+  default: return true; // emergency slots aren't gated by these flags
+  }
+}
+
+// Advances _currentFrame to the next enabled frame in the carousel, wrapping
+// back to FRAME_OVERVIEW after the last emergency slot (or FRAME_RADAR if
+// there are no emergencies). Skips disabled screens entirely.
+void advanceToNextEnabledFrame(int emergencyCount)
+{
+  for (int attempts = 0; attempts < FRAME_RADAR + 1 + MAXRENDER_EMERGENCIES; attempts++)
+  {
+    _currentFrame++;
+    if (_currentFrame > FRAME_EMERGENCY_BASE + emergencyCount - 1 && _currentFrame > FRAME_RADAR)
+    {
+      _currentFrame = FRAME_OVERVIEW;
+    }
+    if (isFrameEnabled(_currentFrame))
+    {
+      return;
+    }
+  }
+  // Nothing enabled — fall back to whatever frame we landed on.
+}
+
 unsigned long _runCurrent;
 unsigned long _runFrame;
 unsigned long _runTime;
@@ -669,7 +704,13 @@ void loop()
   {
     _runCurrent = millis(); // sets the counter
 
-    if (_runCurrent - _runDataUpdate >= UPDATE_ADSBS_INTERVAL_MILLISECS || _forceUpdate)
+    // Poll ADS-B data faster while showing the radar screen so aircraft
+    // motion is visible on the sweep; normal cadence otherwise.
+    unsigned long adsbInterval = (_currentFrame == FRAME_RADAR)
+        ? UPDATE_ADSBS_INTERVAL_RADAR_MILLISECS
+        : UPDATE_ADSBS_INTERVAL_MILLISECS;
+
+    if (_runCurrent - _runDataUpdate >= adsbInterval || _forceUpdate)
     {
       if (!_fetchInProgress)
       {
@@ -707,12 +748,7 @@ void loop()
 
       if (_flightStats.totalAircraft > 0)
       {
-        _currentFrame++;
-        if (_currentFrame > FRAME_EMERGENCY_BASE + _flightStats.emergencyCount - 1 &&
-            _currentFrame > FRAME_MAP)
-        {
-          _currentFrame = FRAME_OVERVIEW;
-        }
+        advanceToNextEnabledFrame(_flightStats.emergencyCount);
       }
 
       xSemaphoreGive(_flightStatsMutex);

@@ -342,7 +342,10 @@ lv_color_t status_color(const String &status) {
     return COLOR_TEXT_1;
 }
 
+void radar_stop(); // fwd decl; defined near the radar screen implementation below
+
 void clear_content() {
+    radar_stop(); // pause the sweep timer before its canvas objects are deleted below
     if (s_content) {
         lv_obj_del(s_content);
         s_content = nullptr;
@@ -533,6 +536,193 @@ void render_map(lv_obj_t *parent, const FlightStats &stats) {
     }
 }
 
+// ── Radar screen (FlightScnr-style sweep display, adapted to a square panel)
+
+constexpr float RADAR_RANGE_NMI = 40.0f; // fixed range shown at the outer ring
+constexpr int RADAR_RING_COUNT = 3;      // rings at RANGE/3, 2*RANGE/3, RANGE
+constexpr uint32_t RADAR_SWEEP_PERIOD_MS = 4000; // one full rotation
+constexpr uint32_t RADAR_SWEEP_TICK_MS = 60;
+
+lv_color_t   *s_radar_canvas_buf = nullptr;
+lv_obj_t     *s_radar_canvas_holder = nullptr;
+lv_obj_t     *s_radar_canvas = nullptr;
+lv_obj_t     *s_radar_sweep_canvas = nullptr; // transparent overlay, redrawn fast
+lv_color_t   *s_radar_sweep_buf = nullptr;
+lv_timer_t   *s_radar_sweep_timer = nullptr;
+
+// Largest square that fits inside the round-display-derived layout while
+// leaving room for the N/S/E/W labels at top/bottom/left/right.
+int radar_center_x() { return DISPLAY_WIDTH / 2; }
+int radar_center_y() { return DISPLAY_HEIGHT / 2; }
+int radar_outer_radius() { return (DISPLAY_WIDTH < DISPLAY_HEIGHT ? DISPLAY_WIDTH : DISPLAY_HEIGHT) / 2 - 30; }
+
+void radar_draw_static(lv_obj_t *canvas) {
+    lv_canvas_fill_bg(canvas, COLOR_BG, LV_OPA_COVER);
+
+    const int cx = radar_center_x();
+    const int cy = radar_center_y();
+    const int outerR = radar_outer_radius();
+
+    lv_draw_arc_dsc_t ring_dsc;
+    lv_draw_arc_dsc_init(&ring_dsc);
+    ring_dsc.color = lv_color_hex(0x2a3a2a);
+    ring_dsc.width = 1;
+
+    for (int i = 1; i <= RADAR_RING_COUNT; i++) {
+        int r = outerR * i / RADAR_RING_COUNT;
+        lv_canvas_draw_arc(canvas, cx, cy, r, 0, 360, &ring_dsc);
+    }
+
+    lv_draw_line_dsc_t cross_dsc;
+    lv_draw_line_dsc_init(&cross_dsc);
+    cross_dsc.color = lv_color_hex(0x2a3a2a);
+    cross_dsc.width = 1;
+
+    lv_point_t horiz[2] = {{(lv_coord_t)(cx - outerR), (lv_coord_t)cy}, {(lv_coord_t)(cx + outerR), (lv_coord_t)cy}};
+    lv_canvas_draw_line(canvas, horiz, 2, &cross_dsc);
+    lv_point_t vert[2] = {{(lv_coord_t)cx, (lv_coord_t)(cy - outerR)}, {(lv_coord_t)cx, (lv_coord_t)(cy + outerR)}};
+    lv_canvas_draw_line(canvas, vert, 2, &cross_dsc);
+}
+
+void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
+    const int cx = radar_center_x();
+    const int cy = radar_center_y();
+    const int outerR = radar_outer_radius();
+
+    lv_draw_rect_dsc_t dot_dsc;
+    lv_draw_rect_dsc_init(&dot_dsc);
+    dot_dsc.radius = LV_RADIUS_CIRCLE;
+
+    lv_draw_label_dsc_t label_dsc;
+    lv_draw_label_dsc_init(&label_dsc);
+    label_dsc.font = &lv_font_montserrat_14;
+
+    for (int i = 0; i < stats.totalAircraft; i++) {
+        const AircraftDetailsStruct &ac = stats.aircraft[i];
+        if (ac.distance <= 0 || ac.distance > RADAR_RANGE_NMI) continue; // rim-clamp skipped: keep radar uncluttered
+
+        float latDiffMiles = (ac.latitude - myLat) * 69.0f;
+        float lonDiffMiles = (ac.longitude - myLon) * 69.0f * cos(radians(myLat));
+        float bearing = atan2(lonDiffMiles, latDiffMiles); // radians, 0 = north
+
+        float r = (ac.distance / RADAR_RANGE_NMI) * outerR;
+        int x = cx + (int)(r * sin(bearing));
+        int y = cy - (int)(r * cos(bearing));
+
+        lv_color_t color = altitude_color(ac.altitude);
+        dot_dsc.bg_color = color;
+        lv_canvas_draw_rect(canvas, x - 5, y - 5, 10, 10, &dot_dsc);
+
+        label_dsc.color = color;
+        char idBuf[12];
+        snprintf(idBuf, sizeof(idBuf), "%s", ac.identifier.c_str());
+        lv_area_t label_area = {(lv_coord_t)(x + 8), (lv_coord_t)(y - 8), (lv_coord_t)(x + 100), (lv_coord_t)(y + 8)};
+        lv_canvas_draw_text(canvas, label_area.x1, label_area.y1, 92, &label_dsc, idBuf);
+    }
+}
+
+void radar_sweep_timer_cb(lv_timer_t *timer) {
+    if (!s_radar_sweep_canvas || !s_radar_sweep_buf) return;
+
+    lv_canvas_fill_bg(s_radar_sweep_canvas, COLOR_BG, LV_OPA_TRANSP); // resets alpha channel to fully transparent
+
+    const int cx = radar_center_x();
+    const int cy = radar_center_y();
+    const int outerR = radar_outer_radius();
+
+    uint32_t phase = millis() % RADAR_SWEEP_PERIOD_MS;
+    float angle = (float)phase / RADAR_SWEEP_PERIOD_MS * 360.0f;
+    float rad = radians(angle);
+
+    lv_draw_line_dsc_t sweep_dsc;
+    lv_draw_line_dsc_init(&sweep_dsc);
+    sweep_dsc.color = COLOR_GREEN;
+    sweep_dsc.width = 2;
+    sweep_dsc.opa = LV_OPA_COVER;
+
+    int x = cx + (int)(outerR * sin(rad));
+    int y = cy - (int)(outerR * cos(rad));
+    lv_point_t sweep_line[2] = {{(lv_coord_t)cx, (lv_coord_t)cy}, {(lv_coord_t)x, (lv_coord_t)y}};
+    lv_canvas_draw_line(s_radar_sweep_canvas, sweep_line, 2, &sweep_dsc);
+
+    // Fading trail wedge behind the sweep line.
+    lv_draw_line_dsc_t trail_dsc;
+    lv_draw_line_dsc_init(&trail_dsc);
+    trail_dsc.color = COLOR_GREEN;
+    trail_dsc.width = 1;
+    for (int t = 1; t <= 18; t++) {
+        float trailAngle = angle - t * 1.5f;
+        float trailRad = radians(trailAngle);
+        trail_dsc.opa = LV_OPA_COVER - (LV_OPA_COVER * t / 18);
+        int tx = cx + (int)(outerR * sin(trailRad));
+        int ty = cy - (int)(outerR * cos(trailRad));
+        lv_point_t trail_line[2] = {{(lv_coord_t)cx, (lv_coord_t)cy}, {(lv_coord_t)tx, (lv_coord_t)ty}};
+        lv_canvas_draw_line(s_radar_sweep_canvas, trail_line, 2, &trail_dsc);
+    }
+}
+
+void render_radar(lv_obj_t *parent, const FlightStats &stats) {
+    s_radar_canvas_holder = lv_obj_create(parent);
+    lv_obj_remove_style_all(s_radar_canvas_holder);
+    lv_obj_set_size(s_radar_canvas_holder, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+
+    if (!s_radar_canvas_buf) {
+        s_radar_canvas_buf = (lv_color_t *)heap_caps_malloc(
+            LV_CANVAS_BUF_SIZE_TRUE_COLOR(DISPLAY_WIDTH, DISPLAY_HEIGHT), MALLOC_CAP_SPIRAM);
+    }
+    if (!s_radar_canvas_buf) return;
+
+    s_radar_canvas = lv_canvas_create(s_radar_canvas_holder);
+    lv_canvas_set_buffer(s_radar_canvas, s_radar_canvas_buf, DISPLAY_WIDTH, DISPLAY_HEIGHT, LV_IMG_CF_TRUE_COLOR);
+    radar_draw_static(s_radar_canvas);
+    radar_draw_aircraft(s_radar_canvas, stats);
+
+    if (!s_radar_sweep_buf) {
+        s_radar_sweep_buf = (lv_color_t *)heap_caps_malloc(
+            LV_CANVAS_BUF_SIZE_TRUE_COLOR_ALPHA(DISPLAY_WIDTH, DISPLAY_HEIGHT), MALLOC_CAP_SPIRAM);
+    }
+    if (s_radar_sweep_buf) {
+        s_radar_sweep_canvas = lv_canvas_create(s_radar_canvas_holder);
+        lv_canvas_set_buffer(s_radar_sweep_canvas, s_radar_sweep_buf, DISPLAY_WIDTH, DISPLAY_HEIGHT, LV_IMG_CF_TRUE_COLOR_ALPHA);
+        lv_canvas_fill_bg(s_radar_sweep_canvas, COLOR_BG, LV_OPA_TRANSP);
+    }
+
+    const int cx = radar_center_x();
+    const int cy = radar_center_y();
+    const int outerR = radar_outer_radius();
+
+    lv_obj_t *lblN = create_label(s_radar_canvas_holder, &lv_font_montserrat_16, COLOR_GREEN, "N");
+    lv_obj_align(lblN, LV_ALIGN_TOP_LEFT, cx - 5, cy - outerR - 22);
+    lv_obj_t *lblS = create_label(s_radar_canvas_holder, &lv_font_montserrat_16, COLOR_GREEN, "S");
+    lv_obj_align(lblS, LV_ALIGN_TOP_LEFT, cx - 5, cy + outerR + 4);
+    lv_obj_t *lblE = create_label(s_radar_canvas_holder, &lv_font_montserrat_16, COLOR_GREEN, "E");
+    lv_obj_align(lblE, LV_ALIGN_TOP_LEFT, cx + outerR + 8, cy - 8);
+    lv_obj_t *lblW = create_label(s_radar_canvas_holder, &lv_font_montserrat_16, COLOR_GREEN, "W");
+    lv_obj_align(lblW, LV_ALIGN_TOP_LEFT, cx - outerR - 20, cy - 8);
+
+    char rangeBuf[16];
+    snprintf(rangeBuf, sizeof(rangeBuf), "%dnmi", (int)RADAR_RANGE_NMI);
+    lv_obj_t *lblRange = create_label(s_radar_canvas_holder, &lv_font_montserrat_14, COLOR_TEXT_3, rangeBuf);
+    lv_obj_align(lblRange, LV_ALIGN_TOP_LEFT, cx + 6, cy - outerR + 2);
+
+    if (!s_radar_sweep_timer) {
+        s_radar_sweep_timer = lv_timer_create(radar_sweep_timer_cb, RADAR_SWEEP_TICK_MS, nullptr);
+    }
+    lv_timer_resume(s_radar_sweep_timer);
+}
+
+void radar_stop() {
+    if (s_radar_sweep_timer) {
+        lv_timer_pause(s_radar_sweep_timer);
+    }
+    // Objects live under s_content and are about to be (or already were)
+    // deleted by clear_content(); drop our references so the paused timer
+    // callback never touches freed canvases.
+    s_radar_canvas_holder = nullptr;
+    s_radar_canvas = nullptr;
+    s_radar_sweep_canvas = nullptr;
+}
+
 } // namespace
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -640,6 +830,9 @@ void display_render_frame(uint8_t frame, const FlightStats &stats) {
         break;
     case FRAME_MAP:
         render_map(parent, stats);
+        break;
+    case FRAME_RADAR:
+        render_radar(parent, stats);
         break;
     default: {
         int emergencyIndex = frame - FRAME_EMERGENCY_BASE;
