@@ -26,12 +26,12 @@ struct SpiRamAllocator {
 };
 using SpiRamJsonDocument = BasicJsonDocument<SpiRamAllocator>;
 
-const char* host = "192.168.1.48"; // Flight data source
-const char* path = "/data/aircraft.json";
-const int port = 8080;
+inline const char* host = "192.168.1.48"; // Flight data source
+inline const char* path = "/data/aircraft.json";
+inline const int port = 8080;
 
-const float myLat = 51.39513478804202;
-const float myLon = -1.338836382480781;
+inline const float myLat = 51.39513478804202;
+inline const float myLon = -1.338836382480781;
 
 struct AircraftDetailsStruct {
     String callsign;
@@ -66,31 +66,31 @@ struct FlightStats {
     AircraftDetailsStruct aircraft[100]; // Store up to 100 aircraft
 };
 
-FlightStats _flightStats;
+inline FlightStats _flightStats;
 
 // --- FreeRTOS fetch-task globals ---
 // PSRAM-backed JSON document, allocated once at boot. 64KB is negligible
 // against the 8MB PSRAM and avoids per-cycle heap churn.
-SpiRamJsonDocument _flightDetailsJSONDoc(65536);
+inline SpiRamJsonDocument _flightDetailsJSONDoc(65536);
 
 // Staging struct — written exclusively by the fetch task on core 0.
 // Swapped into _flightStats under mutex when a fetch completes.
-FlightStats _flightStatsStaging;
+inline FlightStats _flightStatsStaging;
 
 // Mutex protecting _flightStats during swap (fetch task) and render reads (loop task).
-SemaphoreHandle_t _flightStatsMutex = nullptr;
+inline SemaphoreHandle_t _flightStatsMutex = nullptr;
 
 // Handle to the fetch task — used by the main loop to send task notifications.
-TaskHandle_t _fetchTaskHandle = nullptr;
+inline TaskHandle_t _fetchTaskHandle = nullptr;
 
 // Set true while the fetch task is running; prevents re-triggering.
-volatile bool _fetchInProgress = false;
+inline volatile bool _fetchInProgress = false;
 // --- end FreeRTOS fetch-task globals ---
 
 #define EARTH_RADIUS_KM 6371.0
 //#define DEG_TO_RAD 0.017453292519943295
 
-float haversine(float lat1, float lon1, float lat2, float lon2) {
+inline float haversine(float lat1, float lon1, float lat2, float lon2) {
     
     DEBUG_PRINTLN("Calculating haversine");
     /*
@@ -115,7 +115,7 @@ float haversine(float lat1, float lon1, float lat2, float lon2) {
     return EARTH_RADIUS_KM * c;
 }
 
-String getFlightStatus(float verticalRate) {
+inline String getFlightStatus(float verticalRate) {
     if (verticalRate > 500) return "Ascending";
     if (verticalRate < -500) return "Descending";
     return "Cruising";
@@ -124,7 +124,7 @@ String getFlightStatus(float verticalRate) {
 // Fetches aircraft.json and parses it directly into doc via streaming.
 // Uses a filter to discard unused fields before they consume heap space.
 // Returns true on success. Avoids holding the full raw JSON in a String.
-bool fetchFlightData(const char* host, const char* path, const int port, SpiRamJsonDocument &doc) {
+inline bool fetchFlightData(const char* host, const char* path, const int port, SpiRamJsonDocument &doc) {
     WiFiClient client;
 
     DEBUG_PRINTLN("Connecting to " + String(host) + ":" + String(port));
@@ -182,7 +182,7 @@ bool fetchFlightData(const char* host, const char* path, const int port, SpiRamJ
     return true;
 }
 
-void printAircraft(AircraftDetailsStruct AircraftToPrint)
+inline void printAircraft(AircraftDetailsStruct AircraftToPrint)
 {
     DEBUG_PRINTLN("-----------------------------------------------------------------");
     DEBUG_PRINTLN("Aircraft:     "+AircraftToPrint.identifier);
@@ -202,7 +202,7 @@ void printAircraft(AircraftDetailsStruct AircraftToPrint)
 }
 
 
-bool isSquawkEmergency(int squawkCode) {
+inline bool isSquawkEmergency(int squawkCode) {
     /*
     Squawk codes are assigned by air traffic control and can be changed as needed to manage air traffic. Some common squawk codes and their meanings include:
     Squawk 7000: This is the ‘conspicuity code’ for VFR aircraft that are not assigned a specific code by ATC.     
@@ -215,7 +215,7 @@ bool isSquawkEmergency(int squawkCode) {
     return (squawkCode == 0030 || squawkCode == 7600 || squawkCode == 7500 || squawkCode == 7700 || squawkCode == 2000);
 }
 
-void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
+inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
 {
 
     DEBUG_PRINTLN("processFlightData()\n");
@@ -341,7 +341,7 @@ void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
 }
 
 
-void printFlightStats() {
+inline void printFlightStats() {
 
         
     DEBUG_PRINTLN("Closest Aircraft Details:"); 
