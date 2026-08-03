@@ -18,6 +18,7 @@
 #include "merlinUpdateWebServer.h"
 
 #include "merlinFlightStats.h"
+#include "merlinRadarMap.h"
 
 #include "display.h"
 
@@ -41,6 +42,7 @@ float _batteryVoltage = 0;
 
 boolean _forceUpdate = false;
 boolean _forceRender = false;
+boolean _mapSettingsChanged = false; // set by parseConfigValue when a mapstyle/maprange/mapenabled change needs a re-fetch
 
 /* frames */
 byte _currentFrame = FRAME_TOPSTATS;
@@ -177,6 +179,36 @@ bool parseConfigValue(String key, String value)
     }
   }
 
+  if (key == "mapenabled")
+  {
+    bool __newEnabled = (value == "true");
+    if (radarmap::s_enabled != __newEnabled)
+    {
+      radarmap::s_enabled = __newEnabled;
+      _mapSettingsChanged = true;
+    }
+  }
+
+  if (key == "mapstyle")
+  {
+    radarmap::Style __newStyle = radarmap::style_from_name(value);
+    if (radarmap::s_style != __newStyle)
+    {
+      radarmap::s_style = __newStyle;
+      _mapSettingsChanged = true;
+    }
+  }
+
+  if (key == "maprange")
+  {
+    float __newRange = value.toFloat();
+    if (__newRange > 0 && __newRange != radarmap::s_range_nmi)
+    {
+      radarmap::s_range_nmi = __newRange;
+      _mapSettingsChanged = true;
+    }
+  }
+
   DEBUG_PRINTLN("parseConfigValue() - completed...");
 
   return true;
@@ -242,6 +274,9 @@ void saveConfigValuesSPIFFS()
   writeStrtoFile(__configFile, "jsonURI", String(_locationCode));
   writeStrtoFile(__configFile, "flipscreen", String(_configFlipSreen == 3));
   writeStrtoFile(__configFile, "brightness", String(_brightness));
+  writeStrtoFile(__configFile, "mapenabled", String(radarmap::s_enabled ? "true" : "false"));
+  writeStrtoFile(__configFile, "mapstyle", String(radarmap::style_name(radarmap::s_style)));
+  writeStrtoFile(__configFile, "maprange", String(radarmap::s_range_nmi, 1));
 
   __configFile.close();
   DEBUG_PRINTLN("... Done");
@@ -344,9 +379,34 @@ void setupWebServer()
             }
 
             __infoStr += "</select><br>";
+            __infoStr += "<br>";
 
+            __infoStr += "Radar background map:&nbsp;&nbsp;";
+            __infoStr += "<select id='mapenabled' name='mapenabled'>";
+            __infoStr += "<option value='true'" + String(radarmap::s_enabled ? " selected='selected'" : "") + ">On</option>";
+            __infoStr += "<option value='false'" + String(!radarmap::s_enabled ? " selected='selected'" : "") + ">Off</option>";
+            __infoStr += "</select><br>";
+
+            __infoStr += "Map style:&nbsp;&nbsp;";
+            __infoStr += "<select id='mapstyle' name='mapstyle'>";
+            {
+              const radarmap::Style __styles[] = {radarmap::Style::DARK_GRAY, radarmap::Style::LIGHT_GRAY, radarmap::Style::STREETS, radarmap::Style::IMAGERY};
+              const char *__styleLabels[] = {"Dark Gray", "Light Gray", "Streets", "Imagery"};
+              for (int i = 0; i < 4; i++)
+              {
+                __infoStr += "<option value='" + String(radarmap::style_name(__styles[i])) + "'" + (radarmap::s_style == __styles[i] ? " selected='selected'" : "") + ">" + __styleLabels[i] + "</option>";
+              }
+            }
+            __infoStr += "</select><br>";
+
+            __infoStr += "Map range (nmi):&nbsp;&nbsp;";
+            __infoStr += "<input id='maprange' name='maprange' type='number' min='1' max='250' step='1' value='" + String(radarmap::s_range_nmi, 0) + "'><br>";
+            __infoStr += "<br>";
 
              __infoStr += "<input type='submit' class='btn' value='Save setting(s)'>";
+             __infoStr += "</form>";
+             __infoStr += "<form action='/refreshmap'>";
+             __infoStr += "<input type='submit' class='btn' value='Refresh map now'>";
              __infoStr += "</form>";
 
 
@@ -390,6 +450,22 @@ void setupWebServer()
                  {
                     String _webClientReturnString = "Resetting device to defaults";
                     _httpServer.send(200, "text/plain", _webClientReturnString); });
+
+  _httpServer.on("/refreshmap", []()
+                 {
+                   // Respond first — the map fetch below blocks this single-threaded
+                   // server for up to ~15s, so the browser needs something to show
+                   // (and stop spinning on) before that happens, not after.
+                   String __waitPage = "<html><head>" + style;
+                   __waitPage += "<meta http-equiv='refresh' content='16;url=/'>";
+                   __waitPage += "</head><body><p>Refreshing radar map, this can take up to 15 seconds&hellip;</p>";
+                   __waitPage += "<p>You'll be returned to the settings page automatically.</p></body></html>";
+                   _httpServer.send(200, "text/html", __waitPage);
+
+                   DisplayOut("Refreshing radar basemap");
+                   bool __ok = radarmap::refresh();
+                   DEBUG_PRINTLN(__ok ? "Radar map refreshed" : "Radar map refresh failed (check WiFi / basemap enabled)");
+                   _forceRender = true; });
 
   /*handling uploading firmware file */
   _httpServer.on(
@@ -437,6 +513,7 @@ void setupWebServer()
 			String __retMessage = "";
 			String __val = "";
 			bool __update = false;
+			_mapSettingsChanged = false;
 
 			for (uint8_t i = 0; i < _httpServer.args(); i++) {
 				__val = _httpServer.arg(i);
@@ -444,10 +521,30 @@ void setupWebServer()
 				__update = parseConfigValue(__key, __val);
 				__retMessage += " " + _httpServer.argName(i) + ": " + _httpServer.arg(i) + (__update ? " set." : " not set.") + "\n";
 			}
-			_httpServer.send(200, "text/plain", __retMessage);
 
 			if (__update) {
 				saveConfigValuesSPIFFS();
+			}
+
+			// Send the response — and if it needs a map re-fetch, show a visible
+			// wait notice instead of "set." text, since the browser's request
+			// won't finish (spinner keeps going) until the blocking refresh
+			// below returns and this handler exits.
+			if (_mapSettingsChanged) {
+				String __waitPage = "<html><head>" + style;
+				__waitPage += "<meta http-equiv='refresh' content='16;url=/'>";
+				__waitPage += "</head><body><p>Settings saved. Refreshing radar map, this can take up to 15 seconds&hellip;</p>";
+				__waitPage += "<p>You'll be returned to the settings page automatically.</p></body></html>";
+				_httpServer.send(200, "text/html", __waitPage);
+			} else {
+				_httpServer.send(200, "text/plain", __retMessage);
+			}
+
+			if (_mapSettingsChanged) {
+				DisplayOut("Radar map settings changed, refreshing");
+				radarmap::refresh();
+				_forceRender = true;
+				_mapSettingsChanged = false;
 			} });
 
   _httpServer.onNotFound(handleSendToRoot);
@@ -659,6 +756,9 @@ void setup()
   DisplayOut("Opening Filesystem");
   setupSPIFFS();
   loadCustomParamsSPIFFS();
+
+  DisplayOut("Loading radar basemap");
+  radarmap::init();
 
   DisplayOut("Updating local time");
   setupTimeClient();

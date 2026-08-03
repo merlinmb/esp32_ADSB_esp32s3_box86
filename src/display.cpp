@@ -1,4 +1,5 @@
 #include "display.h"
+#include "merlinRadarMap.h"
 
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
@@ -538,7 +539,10 @@ void render_map(lv_obj_t *parent, const FlightStats &stats) {
 
 // ── Radar screen (FlightScnr-style sweep display, adapted to a square panel)
 
-constexpr float RADAR_RANGE_NMI = 40.0f; // fixed range shown at the outer ring
+// Range shown at the outer ring, in nautical miles — reads radarmap's
+// runtime-configurable setting so the radar rings and background map always
+// agree on scale (see radarmap::s_range_nmi, configurable via config.ini).
+inline float radar_range_nmi() { return radarmap::s_range_nmi; }
 constexpr int RADAR_RING_COUNT = 3;      // rings at RANGE/3, 2*RANGE/3, RANGE
 constexpr uint32_t RADAR_SWEEP_PERIOD_MS = 4000; // one full rotation
 constexpr uint32_t RADAR_SWEEP_TICK_MS = 60;
@@ -557,8 +561,6 @@ int radar_center_y() { return DISPLAY_HEIGHT / 2; }
 int radar_outer_radius() { return (DISPLAY_WIDTH < DISPLAY_HEIGHT ? DISPLAY_WIDTH : DISPLAY_HEIGHT) / 2 - 30; }
 
 void radar_draw_static(lv_obj_t *canvas) {
-    lv_canvas_fill_bg(canvas, COLOR_BG, LV_OPA_COVER);
-
     const int cx = radar_center_x();
     const int cy = radar_center_y();
     const int outerR = radar_outer_radius();
@@ -597,15 +599,17 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
     lv_draw_label_dsc_init(&label_dsc);
     label_dsc.font = &lv_font_montserrat_14;
 
+    const float rangeNmi = radar_range_nmi();
+
     for (int i = 0; i < stats.totalAircraft; i++) {
         const AircraftDetailsStruct &ac = stats.aircraft[i];
-        if (ac.distance <= 0 || ac.distance > RADAR_RANGE_NMI) continue; // rim-clamp skipped: keep radar uncluttered
+        if (ac.distance <= 0 || ac.distance > rangeNmi) continue; // rim-clamp skipped: keep radar uncluttered
 
         float latDiffMiles = (ac.latitude - myLat) * 69.0f;
         float lonDiffMiles = (ac.longitude - myLon) * 69.0f * cos(radians(myLat));
         float bearing = atan2(lonDiffMiles, latDiffMiles); // radians, 0 = north
 
-        float r = (ac.distance / RADAR_RANGE_NMI) * outerR;
+        float r = (ac.distance / rangeNmi) * outerR;
         int x = cx + (int)(r * sin(bearing));
         int y = cy - (int)(r * cos(bearing));
 
@@ -674,6 +678,14 @@ void render_radar(lv_obj_t *parent, const FlightStats &stats) {
 
     s_radar_canvas = lv_canvas_create(s_radar_canvas_holder);
     lv_canvas_set_buffer(s_radar_canvas, s_radar_canvas_buf, DISPLAY_WIDTH, DISPLAY_HEIGHT, LV_IMG_CF_TRUE_COLOR);
+
+    if (radarmap::ready() && radarmap::MAP_SIZE_PX == DISPLAY_WIDTH && radarmap::MAP_SIZE_PX == DISPLAY_HEIGHT) {
+        memcpy(s_radar_canvas_buf, radarmap::buffer(),
+               (size_t)DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(lv_color_t));
+    } else {
+        lv_canvas_fill_bg(s_radar_canvas, COLOR_BG, LV_OPA_COVER);
+    }
+
     radar_draw_static(s_radar_canvas);
     radar_draw_aircraft(s_radar_canvas, stats);
 
@@ -701,7 +713,7 @@ void render_radar(lv_obj_t *parent, const FlightStats &stats) {
     lv_obj_align(lblW, LV_ALIGN_TOP_LEFT, cx - outerR - 20, cy - 8);
 
     char rangeBuf[16];
-    snprintf(rangeBuf, sizeof(rangeBuf), "%dnmi", (int)RADAR_RANGE_NMI);
+    snprintf(rangeBuf, sizeof(rangeBuf), "%dnmi", (int)radar_range_nmi());
     lv_obj_t *lblRange = create_label(s_radar_canvas_holder, &lv_font_montserrat_14, COLOR_TEXT_3, rangeBuf);
     lv_obj_align(lblRange, LV_ALIGN_TOP_LEFT, cx + 6, cy - outerR + 2);
 
