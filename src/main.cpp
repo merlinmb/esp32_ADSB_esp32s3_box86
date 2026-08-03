@@ -196,6 +196,18 @@ bool parseConfigValue(String key, String value)
     {
       radarmap::s_style = __newStyle;
       _mapSettingsChanged = true;
+
+      // Streets (highlight) renders every road at full brightness — at the
+      // 40nmi default range roads merge into a solid mesh that swamps the
+      // radar rings/aircraft. Nudge to a range where individual roads and
+      // labels stay legible. Only applies switching INTO this style with
+      // the range still at its as-shipped default — an explicit maprange
+      // set by the user (via config.ini or the webserver, in this request
+      // or a prior one) is never overridden.
+      if (__newStyle == radarmap::Style::STREETS_HIGHLIGHT && radarmap::s_range_nmi == 40.0f)
+      {
+        radarmap::s_range_nmi = 12.0f;
+      }
     }
   }
 
@@ -390,9 +402,9 @@ void setupWebServer()
             __infoStr += "Map style:&nbsp;&nbsp;";
             __infoStr += "<select id='mapstyle' name='mapstyle'>";
             {
-              const radarmap::Style __styles[] = {radarmap::Style::DARK_GRAY, radarmap::Style::LIGHT_GRAY, radarmap::Style::STREETS, radarmap::Style::IMAGERY};
-              const char *__styleLabels[] = {"Dark Gray", "Light Gray", "Streets", "Imagery"};
-              for (int i = 0; i < 4; i++)
+              const radarmap::Style __styles[] = {radarmap::Style::DARK_GRAY, radarmap::Style::LIGHT_GRAY, radarmap::Style::STREETS, radarmap::Style::IMAGERY, radarmap::Style::STREETS_HIGHLIGHT};
+              const char *__styleLabels[] = {"Dark Gray", "Light Gray", "Streets", "Imagery", "Streets (black bg, highlighted roads)"};
+              for (int i = 0; i < 5; i++)
               {
                 __infoStr += "<option value='" + String(radarmap::style_name(__styles[i])) + "'" + (radarmap::s_style == __styles[i] ? " selected='selected'" : "") + ">" + __styleLabels[i] + "</option>";
               }

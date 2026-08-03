@@ -46,33 +46,38 @@ enum class Style : uint8_t {
     LIGHT_GRAY = 1,
     STREETS = 2,
     IMAGERY = 3,
+    STREETS_HIGHLIGHT = 4, // World_Street_Map, recolored on-device: black bg, cyan roads, blue water, white labels
 };
 
 // Esri static-export MapServer path for each style, all under the same
-// no-API-key services.arcgisonline.com host.
+// no-API-key services.arcgisonline.com host. STREETS_HIGHLIGHT fetches the
+// same source tiles as STREETS — only the on-device color remap differs.
 inline const char *style_path(Style s) {
     switch (s) {
-        case Style::LIGHT_GRAY: return "Canvas/World_Light_Gray_Base";
-        case Style::STREETS:    return "World_Street_Map";
-        case Style::IMAGERY:    return "World_Imagery";
+        case Style::LIGHT_GRAY:        return "Canvas/World_Light_Gray_Base";
+        case Style::STREETS:           return "World_Street_Map";
+        case Style::STREETS_HIGHLIGHT: return "World_Street_Map";
+        case Style::IMAGERY:           return "World_Imagery";
         case Style::DARK_GRAY:
-        default:                return "Canvas/World_Dark_Gray_Base";
+        default:                       return "Canvas/World_Dark_Gray_Base";
     }
 }
 
 inline const char *style_name(Style s) {
     switch (s) {
-        case Style::LIGHT_GRAY: return "lightgray";
-        case Style::STREETS:    return "streets";
-        case Style::IMAGERY:    return "imagery";
+        case Style::LIGHT_GRAY:        return "lightgray";
+        case Style::STREETS:           return "streets";
+        case Style::STREETS_HIGHLIGHT: return "streetshighlight";
+        case Style::IMAGERY:           return "imagery";
         case Style::DARK_GRAY:
-        default:                return "darkgray";
+        default:                       return "darkgray";
     }
 }
 
 inline Style style_from_name(const String &name) {
     if (name == "lightgray") return Style::LIGHT_GRAY;
     if (name == "streets") return Style::STREETS;
+    if (name == "streetshighlight") return Style::STREETS_HIGHLIGHT;
     if (name == "imagery") return Style::IMAGERY;
     return Style::DARK_GRAY;
 }
@@ -101,10 +106,34 @@ inline size_t jpg_input(JDEC *jd, uint8_t *buff, size_t ndata) {
     return src->file.read(buff, ndata);
 }
 
+// STREETS_HIGHLIGHT remap: recolors Esri's World_Street_Map tiles into a
+// black-background radar-style backdrop. Thresholds were picked by sampling
+// real tile pixels (roads are a warm salmon/red-brown fill+outline, water is
+// a flat light blue, label text is near-black low-saturation, everything
+// else — land, vegetation, buildings — is tan/green and gets dropped to
+// black) — not derived from any documented Esri color spec, so a future
+// basemap update could shift them; the four output colors below stay
+// visually distinct from each other if that happens.
+constexpr uint32_t ROAD_HIGHLIGHT_COLOR = 0x00E5FF;  // cyan
+constexpr uint32_t WATER_HIGHLIGHT_COLOR = 0x1E5090; // dark blue
+constexpr uint32_t LABEL_HIGHLIGHT_COLOR = 0xFFFFFF; // white
+
+inline lv_color_t remap_streets_highlight(uint8_t r, uint8_t g, uint8_t b) {
+    bool is_water = (int)b > (int)r + 15;
+    bool is_road = !is_water && (int)r > (int)b + 55 && r >= g;
+    bool is_label = !is_water && !is_road && r < 60 && g < 60 && b < 60;
+
+    if (is_road) return lv_color_hex(ROAD_HIGHLIGHT_COLOR);
+    if (is_water) return lv_color_hex(WATER_HIGHLIGHT_COLOR);
+    if (is_label) return lv_color_hex(LABEL_HIGHLIGHT_COLOR);
+    return lv_color_hex(0x000000);
+}
+
 inline int jpg_output(JDEC *jd, void *bitmap, JRECT *rect) {
     (void)jd;
     const uint8_t *src = (const uint8_t *)bitmap; // RGB888 rows (JD_FORMAT 0)
     const int row_width = rect->right - rect->left + 1;
+    const bool highlight = (s_style == Style::STREETS_HIGHLIGHT);
 
     for (int y = rect->top; y <= rect->bottom; y++) {
         if (y >= MAP_SIZE_PX) continue;
@@ -113,7 +142,7 @@ inline int jpg_output(JDEC *jd, void *bitmap, JRECT *rect) {
             if (rect->left + x >= MAP_SIZE_PX) break;
             uint8_t r = src[0], g = src[1], b = src[2];
             src += 3;
-            dst_row[x] = lv_color_make(r, g, b);
+            dst_row[x] = highlight ? remap_streets_highlight(r, g, b) : lv_color_make(r, g, b);
         }
     }
     return 1;
