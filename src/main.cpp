@@ -22,14 +22,14 @@
 
 #include "display.h"
 
-#define WMAPNAME "ADSB_Monitor86"
+#define WMAPNAME "ADSB_Monitor"
 
 #define MAXBRIGHTNESS 255
 #define MINBRIGHTNESS 0
 
 #define location "51.39502, -1.3387" // 97 Enborne Road
 
-#define MCMDVERSION 1.5
+#define MCMDVERSION 1.4
 
 bool _brightnessHigh = true;
 byte _brightness = MAXBRIGHTNESS;
@@ -767,8 +767,7 @@ void loop()
       _forceUpdate = false;
     }
 
-    bool dataUpdated = _spritesNeedUpdate;
-    if (dataUpdated)
+    if (_spritesNeedUpdate)
     {
       _spritesNeedUpdate = false;
       _forceRender = true; // re-render current frame with the new data
@@ -786,11 +785,10 @@ void loop()
     }
 
     unsigned long frameInterval = (_currentFrame == FRAME_RADAR)
-      ? _radarDwellMillis
+      ? UPDATE_UI_RADAR_FRAME_INTERVAL_MILLISECS
       : UPDATE_UI_FRAME_INTERVAL_MILLISECS;
 
-    bool frameElapsed = _runCurrent - _runFrame >= frameInterval;
-    if (frameElapsed || _forceUpdate || _forceRender)
+    if ((_runCurrent - _runFrame >= frameInterval) || _forceUpdate || _forceRender)
     {
       DEBUG_PRINTLN("Current Frame: " + String(_currentFrame));
 
@@ -798,9 +796,7 @@ void loop()
 
       display_render_frame(_currentFrame, _flightStats);
 
-      // Fresh radar data redraws the existing canvas but must not shorten its
-      // dwell period. User-forced renders keep their existing advance behavior.
-      if (_flightStats.totalAircraft > 0 && (frameElapsed || !dataUpdated))
+      if (_flightStats.totalAircraft > 0)
       {
         advanceToNextEnabledFrame(_flightStats.emergencyCount);
       }
@@ -809,10 +805,7 @@ void loop()
 
       _forceUpdate = false;
       _forceRender = false;
-      if (frameElapsed || !dataUpdated)
-      {
-        _runFrame = millis();
-      }
+      _runFrame = millis();
     }
 
     if (_runCurrent - _runTime >= UPDATE_TIME_INTERVAL_MILLISECS)

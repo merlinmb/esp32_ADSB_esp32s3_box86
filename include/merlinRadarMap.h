@@ -40,8 +40,8 @@ constexpr int RADAR_OUTER_RADIUS_PX = MAP_SIZE_PX / 2 - 30; // mirrors radar_out
 
 // Bump this name when the map rendering changes so an old cache cannot hide
 // an updated style after a firmware upload.
-constexpr const char *CACHE_PATH = "/radarmap-v2.jpg";
-constexpr const char *CACHE_TEMP_PATH = "/radarmap-v2.tmp";
+constexpr const char *CACHE_PATH = "/radarmap-v3.jpg";
+constexpr const char *CACHE_TEMP_PATH = "/radarmap-v3.tmp";
 constexpr const char *ARCGIS_HOST = "services.arcgisonline.com";
 constexpr const char *ARCGIS_FALLBACK_HOST = "server.arcgisonline.com";
 
@@ -60,9 +60,9 @@ inline const char *style_path(Style s) {
     switch (s) {
         case Style::LIGHT_GRAY:        return "Canvas/World_Light_Gray_Base";
         case Style::STREETS:           return "World_Street_Map";
-        case Style::STREETS_HIGHLIGHT: return "World_Street_Map";
         case Style::IMAGERY:           return "World_Imagery";
         case Style::DARK_GRAY:
+        case Style::STREETS_HIGHLIGHT: return "Canvas/World_Dark_Gray_Base";
         default:                       return "World_Street_Map";
     }
 }
@@ -94,6 +94,7 @@ inline float s_range_nmi = 40.0f; // ground distance (radius) shown at the radar
 inline bool s_scan_line_enabled = false;
 
 inline lv_color_t *s_map_buf = nullptr; // RGB565, MAP_SIZE_PX x MAP_SIZE_PX, PSRAM
+inline uint8_t *s_jpeg_work_buf = nullptr;
 inline bool s_map_ready = false;
 
 // ── TJpgDec plumbing: decode straight into s_map_buf, converting RGB888->RGB565 ──
@@ -111,10 +112,7 @@ inline size_t jpg_input(JDEC *jd, uint8_t *buff, size_t ndata) {
     return src->file.read(buff, ndata);
 }
 
-// Recolor Esri's World_Street_Map into a dark, road-focused basemap. The
-// Canvas dark base service is intentionally sparse and leaves the radar
-// background almost black at this scale, so the street service supplies the
-// road detail and this palette keeps it visually quiet beneath the sweep.
+// Recolor the bright, neutral road linework in Esri's dark-gray basemap.
 constexpr uint32_t ROAD_HIGHLIGHT_COLOR = 0x00E5FF;  // cyan
 constexpr uint32_t WATER_HIGHLIGHT_COLOR = 0x1E5090; // dark blue
 constexpr uint32_t LABEL_HIGHLIGHT_COLOR = 0xFFFFFF; // white
@@ -123,8 +121,11 @@ constexpr uint32_t WATER_DARK_COLOR = 0x102A38;
 constexpr uint32_t LABEL_DARK_COLOR = 0x89949A;
 
 inline lv_color_t remap_streets(uint8_t r, uint8_t g, uint8_t b, bool highlight) {
+    int max_channel = max(r, max(g, b));
+    int min_channel = min(r, min(g, b));
+    int chroma = max_channel - min_channel;
     bool is_water = (int)b > (int)r + 15;
-    bool is_road = !is_water && (int)r > (int)b + 20 && r >= g;
+    bool is_road = !is_water && max_channel >= 45 && chroma <= 12;
     bool is_label = !is_water && !is_road && r < 60 && g < 60 && b < 60;
 
     if (highlight) {
@@ -169,11 +170,19 @@ inline bool decode_cached_jpeg() {
         return false;
     }
 
+    if (!s_jpeg_work_buf) {
+        s_jpeg_work_buf = (uint8_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (!s_jpeg_work_buf) {
+        DEBUG_PRINTLN("radarmap: JPEG work buffer alloc failed");
+        f.close();
+        return false;
+    }
+
     static JDEC jd;
-    static uint8_t work[4096];
     DecodeSource src{f};
 
-    JRESULT res = jd_prepare(&jd, jpg_input, work, sizeof(work), &src);
+    JRESULT res = jd_prepare(&jd, jpg_input, s_jpeg_work_buf, 4096, &src);
     if (res != JDR_OK) {
         DEBUG_PRINTLN("radarmap: jd_prepare failed: " + String((int)res));
         f.close();
@@ -215,89 +224,90 @@ inline bool fetch_and_cache() {
              x - range_m, y - range_m, x + range_m, y + range_m,
              MAP_SIZE_PX, MAP_SIZE_PX);
 
-    WiFiClientSecure client;
-    client.setInsecure(); // no cert pinning available on-device; matches project's existing WiFiClientSecure usage
-    client.setTimeout(15000);
-
-    const char *connected_host = nullptr;
     const char *hosts[] = {ARCGIS_HOST, ARCGIS_FALLBACK_HOST};
     for (const char *host : hosts) {
-        for (int attempt = 0; attempt < 2; attempt++) {
-            DEBUG_PRINTLN("radarmap: connecting to " + String(host));
-            if (client.connect(host, 443)) {
-                connected_host = host;
+        WiFiClientSecure client;
+        client.setInsecure();
+        client.setTimeout(15000);
+        client.setHandshakeTimeout(15);
+
+        DEBUG_PRINTLN("radarmap: connecting to " + String(host));
+        if (!client.connect(host, 443)) {
+            char error[80];
+            client.lastError(error, sizeof(error));
+            DEBUG_PRINTLN("radarmap: TLS failed: " + String(error) +
+                          " (free internal heap: " + String(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) + ")");
+            client.stop();
+            continue;
+        }
+
+        client.print(String("GET ") + pathBuf + " HTTP/1.1\r\n" +
+                     "Host: " + host + "\r\n" +
+                     "Connection: close\r\n\r\n");
+
+        unsigned long start = millis();
+        while (client.connected() && !client.available()) {
+            if (millis() - start > 15000) {
+                DEBUG_PRINTLN("radarmap: response timeout");
+                client.stop();
                 break;
             }
-            client.stop();
-            delay(250);
+            delay(10);
         }
-        if (connected_host) break;
-    }
-    if (!connected_host) {
-        DEBUG_PRINTLN("radarmap: connect failed");
-        return false;
-    }
+        if (!client.available()) continue;
 
-    client.print(String("GET ") + pathBuf + " HTTP/1.1\r\n" +
-                 "Host: " + connected_host + "\r\n" +
-                 "Connection: close\r\n\r\n");
+        String statusLine = client.readStringUntil('\n');
+        if (statusLine.indexOf("200") < 0) {
+            DEBUG_PRINTLN("radarmap: HTTP error: " + statusLine);
+            client.stop();
+            continue;
+        }
+        while (client.connected()) {
+            String line = client.readStringUntil('\n');
+            if (line == "\r") break;
+        }
 
-    unsigned long start = millis();
-    while (client.connected() && !client.available()) {
-        if (millis() - start > 15000) {
-            DEBUG_PRINTLN("radarmap: response timeout");
+        SPIFFS.remove(CACHE_TEMP_PATH);
+        File f = SPIFFS.open(CACHE_TEMP_PATH, FILE_WRITE);
+        if (!f) {
+            DEBUG_PRINTLN("radarmap: failed to open cache file for write");
             client.stop();
             return false;
         }
-        delay(10);
-    }
 
-    // Skip HTTP headers.
-    String statusLine = client.readStringUntil('\n');
-    if (statusLine.indexOf("200") < 0) {
-        DEBUG_PRINTLN("radarmap: HTTP error: " + statusLine);
-        client.stop();
-        return false;
-    }
-    while (client.connected()) {
-        String line = client.readStringUntil('\n');
-        if (line == "\r") break;
-    }
-
-    SPIFFS.remove(CACHE_TEMP_PATH);
-    File f = SPIFFS.open(CACHE_TEMP_PATH, FILE_WRITE);
-    if (!f) {
-        DEBUG_PRINTLN("radarmap: failed to open cache file for write");
-        client.stop();
-        return false;
-    }
-
-    uint8_t buf[512];
-    size_t total = 0;
-    while (client.connected() || client.available()) {
-        size_t n = client.available();
-        if (n > 0) {
-            size_t toRead = n > sizeof(buf) ? sizeof(buf) : n;
-            size_t got = client.read(buf, toRead);
-            f.write(buf, got);
-            total += got;
-        } else if (!client.connected()) {
-            break;
-        } else {
-            delay(1);
+        uint8_t buf[512];
+        size_t total = 0;
+        while (client.connected() || client.available()) {
+            size_t n = client.available();
+            if (n > 0) {
+                size_t toRead = n > sizeof(buf) ? sizeof(buf) : n;
+                size_t got = client.read(buf, toRead);
+                f.write(buf, got);
+                total += got;
+            } else if (!client.connected()) {
+                break;
+            } else {
+                delay(1);
+            }
         }
-    }
-    f.close();
-    client.stop();
+        f.close();
+        client.stop();
 
-    if (total == 0 || !SPIFFS.rename(CACHE_TEMP_PATH, CACHE_PATH)) {
+        if (total > 0) {
+            bool cache_removed = !SPIFFS.exists(CACHE_PATH) || SPIFFS.remove(CACHE_PATH);
+            if (cache_removed && SPIFFS.rename(CACHE_TEMP_PATH, CACHE_PATH)) {
+                DEBUG_PRINTLN("radarmap: fetched " + String(total) + " bytes");
+                return true;
+            }
+        }
+
         SPIFFS.remove(CACHE_TEMP_PATH);
         DEBUG_PRINTLN("radarmap: failed to update cache");
         return false;
     }
 
-    DEBUG_PRINTLN("radarmap: fetched " + String(total) + " bytes");
-    return true;
+    DEBUG_PRINTLN("radarmap: connect failed");
+    return false;
 }
 
 // Call once at boot, after WiFi + SPIFFS are up. Loads from SPIFFS cache if
