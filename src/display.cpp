@@ -383,9 +383,9 @@ lv_color_t status_color(const String &status) {
 void radar_stop(); // fwd decl; defined near the radar screen implementation below
 void dismiss_radar_info();
 
-void clear_content() {
+void clear_content(bool keep_radar_info = false) {
     radar_stop(); // pause the sweep timer before its canvas objects are deleted below
-    dismiss_radar_info();
+    if (!keep_radar_info) dismiss_radar_info();
     if (s_content) {
         lv_obj_del(s_content);
         s_content = nullptr;
@@ -400,9 +400,9 @@ void clear_startup_log() {
     }
 }
 
-lv_obj_t *begin_content() {
+lv_obj_t *begin_content(bool keep_radar_info = false) {
     clear_startup_log();
-    clear_content();
+    clear_content(keep_radar_info);
     s_content = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_content);
     lv_obj_set_size(s_content, DISPLAY_WIDTH, DISPLAY_HEIGHT);
@@ -1247,7 +1247,7 @@ void display_set_brightness(uint8_t level) {
 }
 
 void display_render_frame(uint8_t frame, const FlightStats &stats) {
-    lv_obj_t *parent = begin_content();
+    lv_obj_t *parent = begin_content(frame == FRAME_RADAR);
 
     if (stats.totalAircraft == 0) {
         render_empty(parent);
