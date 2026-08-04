@@ -281,6 +281,10 @@ lv_obj_t *s_content       = nullptr;
 lv_obj_t *s_clock_label   = nullptr;
 lv_obj_t *s_touch_zone_left  = nullptr;
 lv_obj_t *s_touch_zone_right = nullptr;
+lv_obj_t *s_startup_log      = nullptr;
+bool s_startup_active        = true;
+constexpr uint8_t STARTUP_LOG_LINES = 14;
+String s_startup_lines[STARTUP_LOG_LINES];
 
 // Double-tap detection state, mirrors the debounce style used for GT911 reads.
 unsigned long s_last_left_tap_ms  = 0;
@@ -383,7 +387,16 @@ void clear_content() {
     }
 }
 
+void clear_startup_log() {
+    s_startup_active = false;
+    if (s_startup_log) {
+        lv_obj_del(s_startup_log);
+        s_startup_log = nullptr;
+    }
+}
+
 lv_obj_t *begin_content() {
+    clear_startup_log();
     clear_content();
     s_content = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_content);
@@ -908,6 +921,43 @@ bool display_ready() {
 
 void display_debug_line(const String &line) {
     Serial.println(line);
+    if (!s_display_ready || !s_startup_active) return;
+
+    for (uint8_t i = 0; i < STARTUP_LOG_LINES - 1; i++) {
+        s_startup_lines[i] = s_startup_lines[i + 1];
+    }
+    s_startup_lines[STARTUP_LOG_LINES - 1] = line;
+
+    if (!s_startup_log) {
+        s_startup_log = lv_obj_create(s_root);
+        lv_obj_remove_style_all(s_startup_log);
+        lv_obj_set_size(s_startup_log, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        lv_obj_clear_flag(s_startup_log, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_move_background(s_startup_log);
+
+        lv_obj_t *title = create_label(s_startup_log, &font_inter_bold_18, COLOR_TEXT_1, "ADSB MONITOR");
+        lv_obj_set_pos(title, 20, 24);
+        lv_obj_t *subtitle = create_label(s_startup_log, &font_inter_regular_14, COLOR_TEXT_2, "Starting up");
+        lv_obj_set_pos(subtitle, 20, 52);
+    }
+
+    String text;
+    for (uint8_t i = 0; i < STARTUP_LOG_LINES; i++) {
+        if (!s_startup_lines[i].isEmpty()) {
+            if (!text.isEmpty()) text += '\n';
+            text += s_startup_lines[i];
+        }
+    }
+
+    lv_obj_t *log = lv_obj_get_child(s_startup_log, 2);
+    if (!log) {
+        log = create_label(s_startup_log, &font_jetbrainsmono_medium_12, COLOR_TEXT_2, "");
+        lv_obj_set_width(log, DISPLAY_WIDTH - 40);
+        lv_label_set_long_mode(log, LV_LABEL_LONG_WRAP);
+        lv_obj_set_pos(log, 20, 92);
+    }
+    lv_label_set_text(log, text.c_str());
+    lv_timer_handler();
 }
 
 void display_init() {
