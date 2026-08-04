@@ -613,16 +613,22 @@ void render_aircraft_card(lv_obj_t *parent, const FlightStats &stats, const Airc
     render_screen_header(parent, is_emergency ? "PRIORITY AIRCRAFT" : "CLOSEST FLIGHT", "Tracking");
 
     if (stats.totalAircraft > 0) {
+        constexpr int badge_w = 132;
+        constexpr int badge_h = 66;
         lv_obj_t *badge = lv_obj_create(parent);
-        lv_obj_set_size(badge, 112, 50);
-        lv_obj_set_pos(badge, DISPLAY_WIDTH - 132, 20);
+        lv_obj_set_size(badge, badge_w, badge_h);
+        lv_obj_set_pos(badge, DISPLAY_WIDTH - badge_w - 20, 20);
         lv_obj_set_style_bg_color(badge, COLOR_MAGENTA, 0);
         lv_obj_set_style_radius(badge, 6, 0);
         lv_obj_set_style_pad_all(badge, 0, 0);
         lv_obj_t *tracking = create_label(badge, &font_inter_regular_12, lv_color_black(), "TRACKING");
-        lv_obj_set_pos(tracking, 12, 7);
+        lv_obj_set_width(tracking, badge_w);
+        lv_obj_set_style_text_align(tracking, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(tracking, 0, 8);
         lv_obj_t *count = create_label(badge, &font_inter_bold_18, lv_color_black(), String(stats.totalAircraft).c_str());
-        lv_obj_set_pos(count, 12, 23);
+        lv_obj_set_width(count, badge_w);
+        lv_obj_set_style_text_align(count, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(count, 0, 26);
     }
 
     lv_obj_t *identity_panel = create_metric_panel(parent, 20, 98, 440, 82);
@@ -736,11 +742,11 @@ void draw_aircraft_icon(lv_obj_t *canvas, int x, int y, const AircraftDetailsStr
     };
 
     if (kind == AircraftIconKind::Helicopter) {
-        draw_segment(0, -7, 0, 7);   // fuselage
-        draw_segment(-9, -3, 9, -3); // main rotor
-        draw_segment(0, 6, 0, 10);   // tail boom
+        draw_segment(-7, -7, 7, 7);  // rotor blade 1 (X)
+        draw_segment(-7, 7, 7, -7);  // rotor blade 2 (X)
+        draw_segment(0, -6, 0, 9);   // body
         line_dsc.width = 1;
-        draw_segment(-3, 9, 3, 9);   // tail rotor/stabilizer
+        draw_segment(-3, 9, 3, 9);   // short tail
     } else {
         draw_segment(0, -10, 0, 8);   // fuselage
         draw_segment(0, -2, -9, 8);   // left wing, swept back from fuselage
@@ -932,7 +938,7 @@ void radar_draw_static(lv_obj_t *canvas) {
 
     lv_draw_arc_dsc_t ring_dsc;
     lv_draw_arc_dsc_init(&ring_dsc);
-    ring_dsc.color = lv_color_hex(0x2a3a2a);
+    ring_dsc.color = lv_color_hex(0x3d523d);
     ring_dsc.width = 1;
 
     for (int i = 1; i <= RADAR_RING_COUNT; i++) {
@@ -942,7 +948,7 @@ void radar_draw_static(lv_obj_t *canvas) {
 
     lv_draw_line_dsc_t cross_dsc;
     lv_draw_line_dsc_init(&cross_dsc);
-    cross_dsc.color = lv_color_hex(0x2a3a2a);
+    cross_dsc.color = lv_color_hex(0x3d523d);
     cross_dsc.width = 1;
 
     lv_point_t horiz[2] = {{(lv_coord_t)(cx - outerR), (lv_coord_t)cy}, {(lv_coord_t)(cx + outerR), (lv_coord_t)cy}};
@@ -1273,7 +1279,12 @@ void display_render_frame(uint8_t frame, const FlightStats &stats) {
     }
     }
 
-    lv_obj_move_foreground(s_clock_label);
+    if (frame == FRAME_RADAR) {
+        lv_obj_add_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(s_clock_label);
+    }
 }
 
 void display_update_clock(const char *time_text) {
