@@ -588,10 +588,10 @@ void render_topstats(lv_obj_t *parent, const FlightStats &stats) {
         lv_obj_set_pos(label_obj, 12, 9);
         lv_obj_t *identifier_obj = create_label(parent, &font_inter_semibold_14, COLOR_TEXT_1, identifier.c_str());
         lv_obj_set_pos(identifier_obj, 160, y + 8);
-        lv_obj_t *value_obj = create_label(parent, &font_jetbrainsmono_medium_12, value_color, value.c_str());
+        lv_obj_t *value_obj = create_label(parent, &font_inter_semibold_14, value_color, value.c_str());
         lv_obj_set_width(value_obj, 110);
         lv_obj_set_style_text_align(value_obj, LV_TEXT_ALIGN_RIGHT, 0);
-        lv_obj_set_pos(value_obj, 338, y + 10);
+        lv_obj_set_pos(value_obj, 338, y + 8);
     };
 
     stats_row(96,  "FASTEST",  fastest.identifier,  String((int)fastest.speed) + " KT", COLOR_CYAN);
@@ -742,10 +742,11 @@ void draw_aircraft_icon(lv_obj_t *canvas, int x, int y, const AircraftDetailsStr
         line_dsc.width = 1;
         draw_segment(-3, 9, 3, 9);   // tail rotor/stabilizer
     } else {
-        draw_segment(0, -10, 0, 8);  // fuselage
-        draw_segment(-9, swept_wings ? 3 : 0, 9, swept_wings ? 3 : 0); // wings
+        draw_segment(0, -10, 0, 8);   // fuselage
+        draw_segment(0, -2, -9, 8);   // left wing, swept back from fuselage
+        draw_segment(0, -2, 9, 8);    // right wing, swept back from fuselage
         line_dsc.width = 1;
-        draw_segment(-3, 6, 3, 6);   // tailplane
+        draw_segment(-3, 7, 3, 7);    // tailplane
     }
 }
 
@@ -890,7 +891,10 @@ void show_radar_info(const RadarHitTarget &target) {
     lv_obj_t *metrics_label = create_label(s_radar_info_box, &font_jetbrainsmono_medium_12, COLOR_CYAN, metrics);
     lv_obj_set_pos(metrics_label, 12, 34);
 
-    String details = String(target.status) + "  " + target.route;
+    String routeStr = String(target.route);
+    String details = (routeStr.length() > 0 && routeStr != "Unknown")
+        ? String(target.status) + "  " + routeStr
+        : String(target.status);
     lv_obj_t *details_label = create_label(s_radar_info_box, &font_inter_regular_12, COLOR_TEXT_2, details.c_str());
     lv_obj_set_width(details_label, DISPLAY_WIDTH - 64);
     lv_label_set_long_mode(details_label, LV_LABEL_LONG_CLIP);
