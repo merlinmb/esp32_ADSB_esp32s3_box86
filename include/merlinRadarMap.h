@@ -27,6 +27,8 @@ extern "C" {
 
 #include "merlinFlightStats.h" // myLat, myLon
 
+extern const char *GEOAPIFY_KEY;
+
 namespace radarmap {
 
 constexpr int MAP_SIZE_PX = 480; // matches DISPLAY_WIDTH/HEIGHT
@@ -40,22 +42,21 @@ constexpr int RADAR_OUTER_RADIUS_PX = MAP_SIZE_PX / 2 - 30; // mirrors radar_out
 
 // Bump this name when the map rendering changes so an old cache cannot hide
 // an updated style after a firmware upload.
-constexpr const char *CACHE_PATH = "/radarmap-v3.jpg";
-constexpr const char *CACHE_TEMP_PATH = "/radarmap-v3.tmp";
+constexpr const char *CACHE_PATH = "/radarmap-v4.jpg";
+constexpr const char *CACHE_TEMP_PATH = "/radarmap-v4.tmp";
 constexpr const char *ARCGIS_HOST = "services.arcgisonline.com";
 constexpr const char *ARCGIS_FALLBACK_HOST = "server.arcgisonline.com";
+constexpr const char *GEOAPIFY_HOST = "maps.geoapify.com";
 
 enum class Style : uint8_t {
     DARK_GRAY = 0,
     LIGHT_GRAY = 1,
     STREETS = 2,
     IMAGERY = 3,
-    STREETS_HIGHLIGHT = 4, // World_Street_Map, recolored on-device: black bg, cyan roads, blue water, white labels
+    STREETS_HIGHLIGHT = 4, // Geoapify dark-matter basemap
 };
 
-// Esri static-export MapServer path for each style, all under the same
-// no-API-key services.arcgisonline.com host. STREETS_HIGHLIGHT fetches the
-// same source tiles as STREETS — only the on-device color remap differs.
+// Esri static-export MapServer path for each Esri-backed style.
 inline const char *style_path(Style s) {
     switch (s) {
         case Style::LIGHT_GRAY:        return "Canvas/World_Light_Gray_Base";
@@ -144,8 +145,7 @@ inline int jpg_output(JDEC *jd, void *bitmap, JRECT *rect) {
     (void)jd;
     const uint8_t *src = (const uint8_t *)bitmap; // RGB888 rows (JD_FORMAT 0)
     const int row_width = rect->right - rect->left + 1;
-    const bool remap = (s_style == Style::DARK_GRAY || s_style == Style::STREETS_HIGHLIGHT);
-    const bool highlight = (s_style == Style::STREETS_HIGHLIGHT);
+    const bool remap = s_style == Style::DARK_GRAY;
 
     for (int y = rect->top; y <= rect->bottom; y++) {
         if (y >= MAP_SIZE_PX) continue;
@@ -154,7 +154,7 @@ inline int jpg_output(JDEC *jd, void *bitmap, JRECT *rect) {
             if (rect->left + x >= MAP_SIZE_PX) break;
             uint8_t r = src[0], g = src[1], b = src[2];
             src += 3;
-            dst_row[x] = remap ? remap_streets(r, g, b, highlight) : lv_color_make(r, g, b);
+            dst_row[x] = remap ? remap_streets(r, g, b, false) : lv_color_make(r, g, b);
         }
     }
     return 1;
@@ -203,9 +203,7 @@ inline bool decode_cached_jpeg() {
     return true;
 }
 
-// Computes the Web Mercator bbox for myLat/myLon at s_range_nmi and fetches
-// a fresh JPEG from Esri's static export service (using the selected
-// s_style layer), saving it to SPIFFS.
+// Fetches a fresh JPEG from the selected map provider, saving it to SPIFFS.
 inline bool fetch_and_cache() {
     constexpr double EARTH_RADIUS_M = 6378137.0;
     double bbox_half_width_nmi =
@@ -216,16 +214,34 @@ inline bool fetch_and_cache() {
     double y = log(tan(PI / 4.0 + radians(myLat) / 2.0)) * EARTH_RADIUS_M;
 
     char pathBuf[400];
-    snprintf(pathBuf, sizeof(pathBuf),
-             "/arcgis/rest/services/%s/MapServer/export"
-             "?bbox=%.1f,%.1f,%.1f,%.1f&bboxSR=102100&imageSR=102100"
-             "&size=%d,%d&format=jpg&transparent=false&f=image",
-             style_path(s_style),
-             x - range_m, y - range_m, x + range_m, y + range_m,
-             MAP_SIZE_PX, MAP_SIZE_PX);
+    const char *const arcgis_hosts[] = {ARCGIS_HOST, ARCGIS_FALLBACK_HOST};
+    const char *const geoapify_hosts[] = {GEOAPIFY_HOST};
+    const char *const *hosts = arcgis_hosts;
+    size_t host_count = sizeof(arcgis_hosts) / sizeof(arcgis_hosts[0]);
 
-    const char *hosts[] = {ARCGIS_HOST, ARCGIS_FALLBACK_HOST};
-    for (const char *host : hosts) {
+    if (s_style == Style::STREETS_HIGHLIGHT) {
+        constexpr double WEB_MERCATOR_METERS_PER_PIXEL = 156543.03392;
+        double zoom = log2(WEB_MERCATOR_METERS_PER_PIXEL * cos(radians(myLat)) * MAP_SIZE_PX /
+                           (2.0 * range_m));
+        zoom = constrain(zoom, 1.0, 20.0);
+        snprintf(pathBuf, sizeof(pathBuf),
+                 "/v1/staticmap?style=dark-matter&width=%d&height=%d&format=jpeg"
+                 "&center=lonlat:%.6f,%.6f&zoom=%.2f&apiKey=%s",
+                 MAP_SIZE_PX, MAP_SIZE_PX, myLon, myLat, zoom, GEOAPIFY_KEY);
+        hosts = geoapify_hosts;
+        host_count = sizeof(geoapify_hosts) / sizeof(geoapify_hosts[0]);
+    } else {
+        snprintf(pathBuf, sizeof(pathBuf),
+                 "/arcgis/rest/services/%s/MapServer/export"
+                 "?bbox=%.1f,%.1f,%.1f,%.1f&bboxSR=102100&imageSR=102100"
+                 "&size=%d,%d&format=jpg&transparent=false&f=image",
+                 style_path(s_style),
+                 x - range_m, y - range_m, x + range_m, y + range_m,
+                 MAP_SIZE_PX, MAP_SIZE_PX);
+    }
+
+    for (size_t host_index = 0; host_index < host_count; host_index++) {
+        const char *host = hosts[host_index];
         WiFiClientSecure client;
         client.setInsecure();
         client.setTimeout(15000);

@@ -54,6 +54,7 @@ String _locationCode = "";
 #define UPDATE_UI_RADAR_FRAME_INTERVAL_MILLISECS UPDATE_UI_FRAME_INTERVAL_MILLISECS
 #define UPDATE_ADSBS_INTERVAL_MILLISECS 30000     // Update every 30 seconds
 #define UPDATE_TIME_INTERVAL_MILLISECS 900        // Update every <1sec
+unsigned long _radarDwellMillis = 60000;
 
 // Returns whether a given base carousel frame (non-emergency) is enabled per
 // the flags in display.h.
@@ -110,7 +111,6 @@ unsigned long _epochTime;
 
 String _configJSONURI = "";
 int _configFlipSreen = 999;
-unsigned long _radarDwellMillis = 60000;
 
 String _lastMQTTMessage = "";
 
@@ -379,17 +379,27 @@ void setupWebServer()
                 __infoStr += "<option value='" + String(radarmap::style_name(__styles[i])) + "'" + (radarmap::s_style == __styles[i] ? " selected='selected'" : "") + ">" + __styleLabels[i] + "</option>";
               }
             }
-            __infoStr += "</select></div><div class='field'><label for='maprange'>Map range (nmi)</label>";
-            __infoStr += "<input id='maprange' name='maprange' type='number' min='1' max='250' step='1' value='" + String(radarmap::s_range_nmi, 0) + "'></div></section>";
-            __infoStr += "<div class='actions'><input type='submit' class='btn' value='Save settings'></div></form>";
-            __infoStr += "<form action='/refreshmap' class='actions'><input type='submit' class='btn secondary' value='Refresh map'></form>";
-            __infoStr += "<section class='panel'><h2>CONNECTION</h2><div class='status'>";
-            __infoStr += "<div><span>Wi-Fi</span><strong>" + String(SSID) + " (" + _rssiQualityPercentage + "%)</strong></div>";
-            __infoStr += "<div><span>IP ADDRESS</span><strong>" + IpAddress2String(WiFi.localIP()) + "</strong></div>";
-            __infoStr += "<div><span>MAC ADDRESS</span><strong>" + WiFi.macAddress() + "</strong></div>";
-            __infoStr += "<div><span>FIRMWARE</span><strong>" + String(MQTT_CLIENTNAME) + " " + String(MCMDVERSION, 1) + "</strong></div>";
-            __infoStr += "<div><span>LAST MESSAGE RECEIVED</span><strong>" + _lastMQTTMessage + "</strong></div>";
-            __infoStr += "<div><span>LAST MESSAGE PUBLISHED</span><strong>" + _lastPublishedMQTTMessage + "</strong></div></div></section></main></body>";
+            __infoStr += "</select><br>";
+
+            __infoStr += "Map range (nmi):&nbsp;&nbsp;";
+            __infoStr += "<input id='maprange' name='maprange' type='number' min='1' max='250' step='1' value='" + String(radarmap::s_range_nmi, 0) + "'><br>";
+            __infoStr += "<br>";
+
+             __infoStr += "<input type='submit' class='btn' value='Save setting(s)'>";
+             __infoStr += "</form>";
+             __infoStr += "<form action='/refreshmap'>";
+             __infoStr += "<input type='submit' class='btn' value='Refresh map now'>";
+             __infoStr += "</form>";
+
+
+					   __infoStr += "<hr  class='new5'>Connected to: " + String(SSID) + " (" + _rssiQualityPercentage + "%)<br>";
+					   __infoStr += "Last Message Received:  <i>" + _lastMQTTMessage;
+					   __infoStr += "</i><br>Last Message Published: <i>" + _lastPublishedMQTTMessage;
+
+					   __infoStr += "</i><br><hr  class='new5'>IP Address: " + IpAddress2String(WiFi.localIP());
+					   __infoStr += "<br>MAC Address: " + WiFi.macAddress();
+					   __infoStr += "<br>" + String(MQTT_CLIENTNAME) + " - Firmware version: <b>" + String(MCMDVERSION,1);
+					   __infoStr += "</b></div>";
 
 					   String __retStr = __infoStr+"</html>";
 
@@ -767,7 +777,8 @@ void loop()
       _forceUpdate = false;
     }
 
-    if (_spritesNeedUpdate)
+    bool dataUpdated = _spritesNeedUpdate;
+    if (dataUpdated)
     {
       _spritesNeedUpdate = false;
       _forceRender = true; // re-render current frame with the new data
@@ -785,10 +796,11 @@ void loop()
     }
 
     unsigned long frameInterval = (_currentFrame == FRAME_RADAR)
-      ? UPDATE_UI_RADAR_FRAME_INTERVAL_MILLISECS
+      ? _radarDwellMillis
       : UPDATE_UI_FRAME_INTERVAL_MILLISECS;
 
-    if ((_runCurrent - _runFrame >= frameInterval) || _forceUpdate || _forceRender)
+    bool frameElapsed = _runCurrent - _runFrame >= frameInterval;
+    if (frameElapsed || _forceUpdate || _forceRender)
     {
       DEBUG_PRINTLN("Current Frame: " + String(_currentFrame));
 
@@ -796,7 +808,8 @@ void loop()
 
       display_render_frame(_currentFrame, _flightStats);
 
-      if (_flightStats.totalAircraft > 0)
+        if (_flightStats.totalAircraft > 0 &&
+          (_currentFrame != FRAME_RADAR || frameElapsed || !dataUpdated))
       {
         advanceToNextEnabledFrame(_flightStats.emergencyCount);
       }
