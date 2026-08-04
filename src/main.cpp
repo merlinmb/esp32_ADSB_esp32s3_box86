@@ -110,6 +110,7 @@ unsigned long _epochTime;
 
 String _configJSONURI = "";
 int _configFlipSreen = 999;
+unsigned long _radarDwellMillis = 60000;
 
 String _lastMQTTMessage = "";
 
@@ -214,6 +215,13 @@ bool parseConfigValue(String key, String value)
     radarmap::s_scan_line_enabled = (value == "true");
   }
 
+  if (key == "radardwellseconds")
+  {
+    unsigned long __seconds = value.toInt();
+    if (__seconds < 60) __seconds = 60;
+    _radarDwellMillis = __seconds * 1000UL;
+  }
+
   DEBUG_PRINTLN("parseConfigValue() - completed...");
 
   return true;
@@ -283,6 +291,7 @@ void saveConfigValuesSPIFFS()
   writeStrtoFile(__configFile, "mapstyle", String(radarmap::style_name(radarmap::s_style)));
   writeStrtoFile(__configFile, "maprange", String(radarmap::s_range_nmi, 1));
   writeStrtoFile(__configFile, "scanline", String(radarmap::s_scan_line_enabled ? "true" : "false"));
+  writeStrtoFile(__configFile, "radardwellseconds", String(_radarDwellMillis / 1000UL));
 
   __configFile.close();
   DEBUG_PRINTLN("... Done");
@@ -360,7 +369,7 @@ void setupWebServer()
              __infoStr += "<script>function syncToggles(){['brightness','mapenabled','scanline'].forEach(function(id){document.getElementById(id+'Value').value=document.getElementById(id).checked?'true':'false';});document.getElementById('brightnessValue').value=document.getElementById('brightness').checked?'255':'0';}</script></head><body><main class='shell'><header class='masthead'><div class='brand'>FLIGHT RADAR<small>DEVICE CONFIGURATION</small></div><div class='badge'>ONLINE</div></header>";
              __infoStr += "<form action='/set' id='myForm' onsubmit='syncToggles()'>";
              __infoStr += "<section class='panel'><h2>DATA SOURCE</h2><div class='field'><label for='jsonURI'>Aircraft JSON URL</label><input id='jsonURI' data-lpignore='true' name='jsonURI' type='text' value='" + _locationCode + "'></div></section>";
-             __infoStr += "<section class='panel'><h2>DISPLAY</h2><input type='hidden' id='brightnessValue' name='brightness'><label class='toggle'><span>Screen backlight</span><input id='brightness' type='checkbox'" + String(_brightnessHigh ? " checked" : "") + "><i class='switch'></i></label><input type='hidden' id='scanlineValue' name='scanline'><label class='toggle'><span>Radar scanning line</span><input id='scanline' type='checkbox'" + String(radarmap::s_scan_line_enabled ? " checked" : "") + "><i class='switch'></i></label></section>";
+             __infoStr += "<section class='panel'><h2>DISPLAY</h2><input type='hidden' id='brightnessValue' name='brightness'><label class='toggle'><span>Screen backlight</span><input id='brightness' type='checkbox'" + String(_brightnessHigh ? " checked" : "") + "><i class='switch'></i></label><input type='hidden' id='scanlineValue' name='scanline'><label class='toggle'><span>Radar scanning line</span><input id='scanline' type='checkbox'" + String(radarmap::s_scan_line_enabled ? " checked" : "") + "><i class='switch'></i></label><div class='field'><label for='radardwellseconds'>Radar dwell (seconds)</label><input id='radardwellseconds' name='radardwellseconds' type='number' min='60' step='1' value='" + String(_radarDwellMillis / 1000UL) + "'></div></section>";
              __infoStr += "<section class='panel'><h2>RADAR MAP</h2><input type='hidden' id='mapenabledValue' name='mapenabled'><label class='toggle'><span>Background map</span><input id='mapenabled' type='checkbox'" + String(radarmap::s_enabled ? " checked" : "") + "><i class='switch'></i></label><div class='field'><label for='mapstyle'>Map style</label><select id='mapstyle' name='mapstyle'>";
             {
               const radarmap::Style __styles[] = {radarmap::Style::DARK_GRAY, radarmap::Style::LIGHT_GRAY, radarmap::Style::STREETS, radarmap::Style::IMAGERY, radarmap::Style::STREETS_HIGHLIGHT};
@@ -758,7 +767,8 @@ void loop()
       _forceUpdate = false;
     }
 
-    if (_spritesNeedUpdate)
+    bool dataUpdated = _spritesNeedUpdate;
+    if (dataUpdated)
     {
       _spritesNeedUpdate = false;
       _forceRender = true; // re-render current frame with the new data
@@ -776,10 +786,11 @@ void loop()
     }
 
     unsigned long frameInterval = (_currentFrame == FRAME_RADAR)
-      ? UPDATE_UI_RADAR_FRAME_INTERVAL_MILLISECS
+      ? _radarDwellMillis
       : UPDATE_UI_FRAME_INTERVAL_MILLISECS;
 
-    if ((_runCurrent - _runFrame >= frameInterval) || _forceUpdate || _forceRender)
+    bool frameElapsed = _runCurrent - _runFrame >= frameInterval;
+    if (frameElapsed || _forceUpdate || _forceRender)
     {
       DEBUG_PRINTLN("Current Frame: " + String(_currentFrame));
 
@@ -787,7 +798,9 @@ void loop()
 
       display_render_frame(_currentFrame, _flightStats);
 
-      if (_flightStats.totalAircraft > 0)
+      // Fresh radar data redraws the existing canvas but must not shorten its
+      // dwell period. User-forced renders keep their existing advance behavior.
+      if (_flightStats.totalAircraft > 0 && (frameElapsed || !dataUpdated))
       {
         advanceToNextEnabledFrame(_flightStats.emergencyCount);
       }
@@ -796,7 +809,10 @@ void loop()
 
       _forceUpdate = false;
       _forceRender = false;
-      _runFrame = millis();
+      if (frameElapsed || !dataUpdated)
+      {
+        _runFrame = millis();
+      }
     }
 
     if (_runCurrent - _runTime >= UPDATE_TIME_INTERVAL_MILLISECS)

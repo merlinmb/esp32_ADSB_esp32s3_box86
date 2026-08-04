@@ -222,7 +222,7 @@ inline bool isSquawkEmergency(int squawkCode) {
     Squawk 7600: This code indicates that the aircraft has experienced a radio failure and is unable to transmit or receive messages.    
     Squawk 0030:: This code indicates that the aircraft is lost (UK specific). 
     */
-    return (squawkCode == 0030 || squawkCode == 7600 || squawkCode == 7500 || squawkCode == 7700 || squawkCode == 2000);
+    return (squawkCode == 30 || squawkCode == 7600 || squawkCode == 7500 || squawkCode == 7700);
 }
 
 inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)

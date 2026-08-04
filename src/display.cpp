@@ -793,6 +793,15 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
             y < ICON_RADIUS || y >= DISPLAY_HEIGHT - ICON_RADIUS) continue;
 
         lv_color_t color = altitude_color(ac.altitude);
+        if (isSquawkEmergency(ac.squawk)) {
+            lv_draw_arc_dsc_t emergency_dsc;
+            lv_draw_arc_dsc_init(&emergency_dsc);
+            emergency_dsc.color = COLOR_RED;
+            emergency_dsc.width = 3;
+            lv_canvas_draw_arc(canvas, x, y, ICON_RADIUS + 7, 0, 360, &emergency_dsc);
+            emergency_dsc.width = 1;
+            lv_canvas_draw_arc(canvas, x, y, ICON_RADIUS + 11, 0, 360, &emergency_dsc);
+        }
         draw_aircraft_icon(canvas, x, y, ac, color);
 
         label_dsc.color = color;
@@ -801,6 +810,19 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
         lv_area_t label_area = {(lv_coord_t)(x + 8), (lv_coord_t)(y - 8), (lv_coord_t)(x + 100), (lv_coord_t)(y + 8)};
         lv_canvas_draw_text(canvas, label_area.x1, label_area.y1, 92, &label_dsc, idBuf);
     }
+}
+
+void radar_redraw_canvas(const FlightStats &stats) {
+    if (radarmap::ready() && radarmap::MAP_SIZE_PX == DISPLAY_WIDTH && radarmap::MAP_SIZE_PX == DISPLAY_HEIGHT) {
+        memcpy(s_radar_canvas_buf, radarmap::buffer(),
+               (size_t)DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(lv_color_t));
+    } else {
+        lv_canvas_fill_bg(s_radar_canvas, COLOR_BG, LV_OPA_COVER);
+    }
+
+    radar_draw_static(s_radar_canvas);
+    radar_draw_aircraft(s_radar_canvas, stats);
+    lv_obj_invalidate(s_radar_canvas);
 }
 
 void radar_sweep_timer_cb(lv_timer_t *timer) {
@@ -856,15 +878,7 @@ void render_radar(lv_obj_t *parent, const FlightStats &stats) {
     s_radar_canvas = lv_canvas_create(s_radar_canvas_holder);
     lv_canvas_set_buffer(s_radar_canvas, s_radar_canvas_buf, DISPLAY_WIDTH, DISPLAY_HEIGHT, LV_IMG_CF_TRUE_COLOR);
 
-    if (radarmap::ready() && radarmap::MAP_SIZE_PX == DISPLAY_WIDTH && radarmap::MAP_SIZE_PX == DISPLAY_HEIGHT) {
-        memcpy(s_radar_canvas_buf, radarmap::buffer(),
-               (size_t)DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(lv_color_t));
-    } else {
-        lv_canvas_fill_bg(s_radar_canvas, COLOR_BG, LV_OPA_COVER);
-    }
-
-    radar_draw_static(s_radar_canvas);
-    radar_draw_aircraft(s_radar_canvas, stats);
+    radar_redraw_canvas(stats);
 
     if (radarmap::s_scan_line_enabled && !s_radar_sweep_buf) {
         s_radar_sweep_buf = (lv_color_t *)heap_caps_malloc(
@@ -1036,6 +1050,12 @@ void display_set_brightness(uint8_t level) {
 }
 
 void display_render_frame(uint8_t frame, const FlightStats &stats) {
+    if (frame == FRAME_RADAR && s_radar_canvas_holder && s_radar_canvas) {
+        radar_redraw_canvas(stats);
+        lv_obj_move_foreground(s_clock_label);
+        return;
+    }
+
     lv_obj_t *parent = begin_content();
 
     if (stats.totalAircraft == 0) {
