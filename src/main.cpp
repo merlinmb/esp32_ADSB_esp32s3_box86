@@ -22,14 +22,14 @@
 
 #include "display.h"
 
-#define WMAPNAME "ADSB_Monitor"
+#define WMAPNAME "ADSB_Monitor86"
 
 #define MAXBRIGHTNESS 255
 #define MINBRIGHTNESS 0
 
 #define location "51.39502, -1.3387" // 97 Enborne Road
 
-#define MCMDVERSION 1.4
+#define MCMDVERSION 1.5
 
 bool _brightnessHigh = true;
 byte _brightness = MAXBRIGHTNESS;
