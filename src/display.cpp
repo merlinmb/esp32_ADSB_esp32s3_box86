@@ -282,9 +282,12 @@ lv_obj_t *s_clock_label   = nullptr;
 lv_obj_t *s_touch_zone_left  = nullptr;
 lv_obj_t *s_touch_zone_right = nullptr;
 lv_obj_t *s_startup_log      = nullptr;
+lv_obj_t *s_radar_info_box   = nullptr;
+lv_timer_t *s_radar_info_timer = nullptr;
 bool s_startup_active        = true;
 constexpr uint8_t STARTUP_LOG_LINES = 14;
 String s_startup_lines[STARTUP_LOG_LINES];
+constexpr int TOUCH_ZONE_SIZE = 32;
 
 // Double-tap detection state, mirrors the debounce style used for GT911 reads.
 unsigned long s_last_left_tap_ms  = 0;
@@ -329,8 +332,8 @@ void left_zone_long_press_cb(lv_event_t *e) {
 void create_touch_zones() {
     s_touch_zone_left = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_touch_zone_left);
-    lv_obj_set_size(s_touch_zone_left, DISPLAY_WIDTH / 2, DISPLAY_HEIGHT);
-    lv_obj_align(s_touch_zone_left, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_size(s_touch_zone_left, TOUCH_ZONE_SIZE, TOUCH_ZONE_SIZE);
+    lv_obj_align(s_touch_zone_left, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_obj_add_flag(s_touch_zone_left, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(s_touch_zone_left, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_touch_zone_left, left_zone_click_cb, LV_EVENT_CLICKED, nullptr);
@@ -338,8 +341,8 @@ void create_touch_zones() {
 
     s_touch_zone_right = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_touch_zone_right);
-    lv_obj_set_size(s_touch_zone_right, DISPLAY_WIDTH / 2, DISPLAY_HEIGHT);
-    lv_obj_align(s_touch_zone_right, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_size(s_touch_zone_right, TOUCH_ZONE_SIZE, TOUCH_ZONE_SIZE);
+    lv_obj_align(s_touch_zone_right, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
     lv_obj_add_flag(s_touch_zone_right, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(s_touch_zone_right, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_touch_zone_right, right_zone_click_cb, LV_EVENT_CLICKED, nullptr);
@@ -378,9 +381,11 @@ lv_color_t status_color(const String &status) {
 }
 
 void radar_stop(); // fwd decl; defined near the radar screen implementation below
+void dismiss_radar_info();
 
 void clear_content() {
     radar_stop(); // pause the sweep timer before its canvas objects are deleted below
+    dismiss_radar_info();
     if (s_content) {
         lv_obj_del(s_content);
         s_content = nullptr;
@@ -731,11 +736,101 @@ lv_obj_t     *s_radar_sweep_canvas = nullptr; // transparent overlay, redrawn fa
 lv_color_t   *s_radar_sweep_buf = nullptr;
 lv_timer_t   *s_radar_sweep_timer = nullptr;
 
+struct RadarHitTarget {
+    int x;
+    int y;
+    char identifier[16];
+    char description[48];
+    char route[64];
+    char status[16];
+    int altitude;
+    int squawk;
+    float distance;
+    float speed;
+};
+
+RadarHitTarget s_radar_hit_targets[100];
+uint8_t s_radar_hit_target_count = 0;
+constexpr int RADAR_HIT_RADIUS_PX = 18;
+
 // Largest square that fits inside the round-display-derived layout while
 // leaving room for the N/S/E/W labels at top/bottom/left/right.
 int radar_center_x() { return DISPLAY_WIDTH / 2; }
 int radar_center_y() { return DISPLAY_HEIGHT / 2; }
 int radar_outer_radius() { return (DISPLAY_WIDTH < DISPLAY_HEIGHT ? DISPLAY_WIDTH : DISPLAY_HEIGHT) / 2 - 30; }
+
+void dismiss_radar_info() {
+    if (s_radar_info_timer) {
+        lv_timer_del(s_radar_info_timer);
+        s_radar_info_timer = nullptr;
+    }
+    if (s_radar_info_box) {
+        lv_obj_del(s_radar_info_box);
+        s_radar_info_box = nullptr;
+    }
+}
+
+void radar_info_timeout_cb(lv_timer_t *timer) {
+    (void)timer;
+    dismiss_radar_info();
+}
+
+void show_radar_info(const RadarHitTarget &target) {
+    dismiss_radar_info();
+
+    s_radar_info_box = lv_obj_create(s_root);
+    lv_obj_set_size(s_radar_info_box, DISPLAY_WIDTH - 40, 86);
+    lv_obj_set_pos(s_radar_info_box, 20, DISPLAY_HEIGHT - 132);
+    lv_obj_set_style_bg_color(s_radar_info_box, lv_color_hex(0x111520), 0);
+    lv_obj_set_style_bg_opa(s_radar_info_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_radar_info_box, COLOR_CYAN, 0);
+    lv_obj_set_style_border_width(s_radar_info_box, 1, 0);
+    lv_obj_set_style_radius(s_radar_info_box, 8, 0);
+    lv_obj_set_style_pad_all(s_radar_info_box, 0, 0);
+    lv_obj_clear_flag(s_radar_info_box, LV_OBJ_FLAG_SCROLLABLE);
+
+    String title = String(target.identifier) + "  " + target.description;
+    lv_obj_t *title_label = create_label(s_radar_info_box, &font_inter_bold_16, COLOR_TEXT_1, title.c_str());
+    lv_obj_set_width(title_label, DISPLAY_WIDTH - 64);
+    lv_label_set_long_mode(title_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_pos(title_label, 12, 8);
+
+    char metrics[96];
+    snprintf(metrics, sizeof(metrics), "%d FT   %d KT   %.1f NMI   SQWK %04d",
+             target.altitude, (int)target.speed, target.distance, target.squawk);
+    lv_obj_t *metrics_label = create_label(s_radar_info_box, &font_jetbrainsmono_medium_12, COLOR_CYAN, metrics);
+    lv_obj_set_pos(metrics_label, 12, 34);
+
+    String details = String(target.status) + "  " + target.route;
+    lv_obj_t *details_label = create_label(s_radar_info_box, &font_inter_regular_12, COLOR_TEXT_2, details.c_str());
+    lv_obj_set_width(details_label, DISPLAY_WIDTH - 64);
+    lv_label_set_long_mode(details_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_pos(details_label, 12, 58);
+
+    lv_obj_move_foreground(s_radar_info_box);
+    s_radar_info_timer = lv_timer_create(radar_info_timeout_cb, 5000, nullptr);
+    lv_timer_set_repeat_count(s_radar_info_timer, 1);
+}
+
+void radar_canvas_click_cb(lv_event_t *event) {
+    lv_indev_t *indev = lv_event_get_indev(event);
+    if (!indev) return;
+
+    lv_point_t touch;
+    lv_indev_get_point(indev, &touch);
+    int closest_index = -1;
+    int closest_distance_sq = RADAR_HIT_RADIUS_PX * RADAR_HIT_RADIUS_PX;
+    for (uint8_t i = 0; i < s_radar_hit_target_count; i++) {
+        int delta_x = touch.x - s_radar_hit_targets[i].x;
+        int delta_y = touch.y - s_radar_hit_targets[i].y;
+        int distance_sq = delta_x * delta_x + delta_y * delta_y;
+        if (distance_sq <= closest_distance_sq) {
+            closest_distance_sq = distance_sq;
+            closest_index = i;
+        }
+    }
+    if (closest_index >= 0) show_radar_info(s_radar_hit_targets[closest_index]);
+}
 
 void radar_draw_static(lv_obj_t *canvas) {
     const int cx = radar_center_x();
@@ -774,6 +869,7 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
 
     const float rangeNmi = radar_range_nmi();
 
+    s_radar_hit_target_count = 0;
     for (int i = 0; i < stats.totalAircraft; i++) {
         const AircraftDetailsStruct &ac = stats.aircraft[i];
         if (!isfinite(ac.distance) || !isfinite(ac.latitude) || !isfinite(ac.longitude) ||
@@ -794,6 +890,20 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
 
         lv_color_t color = altitude_color(ac.altitude);
         draw_aircraft_icon(canvas, x, y, ac, color, true);
+
+        if (s_radar_hit_target_count < sizeof(s_radar_hit_targets) / sizeof(s_radar_hit_targets[0])) {
+            RadarHitTarget &target = s_radar_hit_targets[s_radar_hit_target_count++];
+            target.x = x;
+            target.y = y;
+            snprintf(target.identifier, sizeof(target.identifier), "%s", ac.identifier.c_str());
+            snprintf(target.description, sizeof(target.description), "%s", ac.description.c_str());
+            snprintf(target.route, sizeof(target.route), "%s", ac.route.c_str());
+            snprintf(target.status, sizeof(target.status), "%s", ac.status.c_str());
+            target.altitude = ac.altitude;
+            target.squawk = ac.squawk;
+            target.distance = ac.distance;
+            target.speed = ac.speed;
+        }
 
         label_dsc.color = color;
         char idBuf[12];
@@ -855,6 +965,8 @@ void render_radar(lv_obj_t *parent, const FlightStats &stats) {
 
     s_radar_canvas = lv_canvas_create(s_radar_canvas_holder);
     lv_canvas_set_buffer(s_radar_canvas, s_radar_canvas_buf, DISPLAY_WIDTH, DISPLAY_HEIGHT, LV_IMG_CF_TRUE_COLOR);
+    lv_obj_add_flag(s_radar_canvas, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_radar_canvas, radar_canvas_click_cb, LV_EVENT_CLICKED, nullptr);
 
     if (radarmap::ready() && radarmap::MAP_SIZE_PX == DISPLAY_WIDTH && radarmap::MAP_SIZE_PX == DISPLAY_HEIGHT) {
         memcpy(s_radar_canvas_buf, radarmap::buffer(),
