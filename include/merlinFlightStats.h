@@ -190,7 +190,7 @@ inline bool fetchFlightData(const char* host, const char* path, const int port, 
     return true;
 }
 
-inline void printAircraft(AircraftDetailsStruct AircraftToPrint)
+inline void printAircraft(const AircraftDetailsStruct& AircraftToPrint)
 {
     if (!VERBOSE_AIRCRAFT_JSON_DEBUG) return;
 
@@ -222,7 +222,7 @@ inline bool isSquawkEmergency(int squawkCode) {
     Squawk 7600: This code indicates that the aircraft has experienced a radio failure and is unable to transmit or receive messages.    
     Squawk 0030:: This code indicates that the aircraft is lost (UK specific). 
     */
-    return (squawkCode == 0030 || squawkCode == 7600 || squawkCode == 7500 || squawkCode == 7700 || squawkCode == 2000);
+    return (squawkCode == 30 || squawkCode == 7600 || squawkCode == 7500 || squawkCode == 7700 || squawkCode == 2000);
 }
 
 inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
@@ -231,10 +231,11 @@ inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
     DEBUG_PRINTLN("processFlightData()\n");
 
     JsonArray aircraft = doc["aircraft"].as<JsonArray>();
-    target.totalAircraft = aircraft.size();
+    const size_t sourceAircraftCount = aircraft.size();
+    target.totalAircraft = 0;
 
     DEBUG_PRINTLN("processFlightData:populating AircraftDetailsStructs");
-    DEBUG_PRINTLN("Total Aircraft from JSON: " + String(target.totalAircraft));
+    DEBUG_PRINTLN("Total Aircraft from JSON: " + String(sourceAircraftCount));
 
     float __highestAircraftaltitude = 0; // Initialize to 0
     target.highestAircraft = 0;
@@ -273,7 +274,7 @@ inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
             plane["squawk"].as<int>() | 0,
             plane["route"] | "Unknown",
             plane["alt_baro"] | 0,
-            plane["distance"],
+            0,
             plane["gs"], // gs=ground speed; tas = true air speed (ias=indicated air speed)
             getFlightStatus(plane["baro_rate"] | 0), //status
             plane["flight"] | "Unknown", //identifier
@@ -298,10 +299,6 @@ inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
             __currentAircraft.identifier = __currentAircraft.callsign;
         }
 
-        float distance = haversine(myLat, myLon, __currentAircraft.latitude, __currentAircraft.longitude);
-        __currentAircraft.distance = distance;
-
-
         printAircraft(__currentAircraft);
 
         if (__currentAircraft.altitude==0 || __currentAircraft.speed==0 )
@@ -312,6 +309,9 @@ inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
         __currentAircraft.description.trim();
         __currentAircraft.route.trim();
         __currentAircraft.identifier.trim();
+
+        float distance = haversine(myLat, myLon, __currentAircraft.latitude, __currentAircraft.longitude);
+        __currentAircraft.distance = distance;
 
 
         totalAltitude += __currentAircraft.altitude;

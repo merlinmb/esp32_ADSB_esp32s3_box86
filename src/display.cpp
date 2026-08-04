@@ -281,6 +281,10 @@ lv_obj_t *s_content       = nullptr;
 lv_obj_t *s_clock_label   = nullptr;
 lv_obj_t *s_touch_zone_left  = nullptr;
 lv_obj_t *s_touch_zone_right = nullptr;
+lv_obj_t *s_startup_log      = nullptr;
+bool s_startup_active        = true;
+constexpr uint8_t STARTUP_LOG_LINES = 14;
+String s_startup_lines[STARTUP_LOG_LINES];
 
 // Double-tap detection state, mirrors the debounce style used for GT911 reads.
 unsigned long s_last_left_tap_ms  = 0;
@@ -383,7 +387,16 @@ void clear_content() {
     }
 }
 
+void clear_startup_log() {
+    s_startup_active = false;
+    if (s_startup_log) {
+        lv_obj_del(s_startup_log);
+        s_startup_log = nullptr;
+    }
+}
+
 lv_obj_t *begin_content() {
+    clear_startup_log();
     clear_content();
     s_content = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_content);
@@ -445,91 +458,6 @@ const char *status_indicator(const String &status) {
     if (normalized == "ascending") return "UP";
     if (normalized == "descending") return "DOWN";
     return "LEVEL";
-}
-
-float aircraft_bearing_degrees(const AircraftDetailsStruct &aircraft) {
-    const float latitude_delta = radians(aircraft.latitude - myLat);
-    const float longitude_delta = radians(aircraft.longitude - myLon);
-    const float origin_latitude = radians(myLat);
-    const float aircraft_latitude = radians(aircraft.latitude);
-
-    const float y = sinf(longitude_delta) * cosf(aircraft_latitude);
-    const float x = cosf(origin_latitude) * sinf(aircraft_latitude) -
-                    sinf(origin_latitude) * cosf(aircraft_latitude) * cosf(longitude_delta);
-    float bearing = degrees(atan2f(y, x));
-    return bearing < 0.0f ? bearing + 360.0f : bearing;
-}
-
-const char *compass_direction(float bearing) {
-    static constexpr const char *DIRECTIONS[] = {
-        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
-        "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"
-    };
-    return DIRECTIONS[(int)((bearing + 11.25f) / 22.5f) % 16];
-}
-
-void render_look_direction(lv_obj_t *parent, const AircraftDetailsStruct &aircraft) {
-    lv_obj_t *panel = create_metric_panel(parent, 20, 316, 440, 124);
-
-    static lv_color_t *compass_buffer = nullptr;
-    constexpr int COMPASS_SIZE = 104;
-    if (!compass_buffer) {
-        compass_buffer = (lv_color_t *)heap_caps_malloc(
-            LV_CANVAS_BUF_SIZE_TRUE_COLOR(COMPASS_SIZE, COMPASS_SIZE), MALLOC_CAP_SPIRAM);
-    }
-
-    const bool has_position = isfinite(aircraft.latitude) && isfinite(aircraft.longitude) &&
-                              isfinite(aircraft.distance) && aircraft.distance > 0.0f;
-    const float bearing = has_position ? aircraft_bearing_degrees(aircraft) : 0.0f;
-    const float elevation = has_position
-        ? degrees(atan2f((float)aircraft.altitude, aircraft.distance * 6076.12f))
-        : 0.0f;
-
-    if (compass_buffer) {
-        lv_obj_t *canvas = lv_canvas_create(panel);
-        lv_canvas_set_buffer(canvas, compass_buffer, COMPASS_SIZE, COMPASS_SIZE, LV_IMG_CF_TRUE_COLOR);
-        lv_canvas_fill_bg(canvas, lv_color_hex(0x111520), LV_OPA_COVER);
-        lv_obj_set_pos(canvas, 10, 10);
-
-        constexpr int CENTER = COMPASS_SIZE / 2;
-        lv_draw_arc_dsc_t ring_dsc;
-        lv_draw_arc_dsc_init(&ring_dsc);
-        ring_dsc.color = COLOR_TEXT_3;
-        ring_dsc.width = 1;
-        lv_canvas_draw_arc(canvas, CENTER, CENTER, 35, 0, 360, &ring_dsc);
-
-        lv_draw_line_dsc_t pointer_dsc;
-        lv_draw_line_dsc_init(&pointer_dsc);
-        pointer_dsc.color = has_position ? COLOR_CYAN : COLOR_TEXT_3;
-        pointer_dsc.width = 3;
-        const float pointer_angle = radians(bearing);
-        const int tip_x = CENTER + (int)(29.0f * sinf(pointer_angle));
-        const int tip_y = CENTER - (int)(29.0f * cosf(pointer_angle));
-        lv_point_t pointer[2] = {{CENTER, CENTER}, {(lv_coord_t)tip_x, (lv_coord_t)tip_y}};
-        lv_canvas_draw_line(canvas, pointer, 2, &pointer_dsc);
-    }
-
-    lv_obj_t *north = create_label(panel, &font_inter_bold_16, COLOR_TEXT_1, "N");
-    lv_obj_set_pos(north, 56, 4);
-    lv_obj_t *east = create_label(panel, &font_inter_regular_12, COLOR_TEXT_2, "E");
-    lv_obj_set_pos(east, 99, 51);
-    lv_obj_t *south = create_label(panel, &font_inter_regular_12, COLOR_TEXT_2, "S");
-    lv_obj_set_pos(south, 57, 99);
-    lv_obj_t *west = create_label(panel, &font_inter_regular_12, COLOR_TEXT_2, "W");
-    lv_obj_set_pos(west, 9, 51);
-
-    char direction_text[20];
-    char elevation_text[24];
-    if (has_position) {
-        snprintf(direction_text, sizeof(direction_text), "%s  %03d DEG", compass_direction(bearing), (int)roundf(bearing));
-        snprintf(elevation_text, sizeof(elevation_text), "%+.0f DEG", elevation);
-    } else {
-        snprintf(direction_text, sizeof(direction_text), "POSITION N/A");
-        snprintf(elevation_text, sizeof(elevation_text), "N/A");
-    }
-
-    metric_label(panel, 136, 18, "LOOK DIRECTION", direction_text, has_position ? COLOR_CYAN : COLOR_TEXT_3);
-    metric_label(panel, 136, 68, "ABOVE HORIZON", elevation_text, has_position ? COLOR_GREEN : COLOR_TEXT_3);
 }
 
 void render_sysinfo(lv_obj_t *parent, const FlightStats &stats) {
@@ -636,10 +564,6 @@ void render_aircraft_card(lv_obj_t *parent, const FlightStats &stats, const Airc
     lv_obj_set_width(status_text, 102);
     lv_obj_set_style_text_align(status_text, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_pos(status_text, 60, 10);
-
-    if (!is_emergency) {
-        render_look_direction(parent, aircraft);
-    }
 }
 
 void render_empty(lv_obj_t *parent) {
@@ -700,7 +624,7 @@ lv_point_t rotate_icon_point(int x, int y, int8_t offset_x, int8_t offset_y, flo
 }
 
 void draw_aircraft_icon(lv_obj_t *canvas, int x, int y, const AircraftDetailsStruct &aircraft,
-                        lv_color_t color) {
+                        lv_color_t color, bool swept_wings = false) {
     const AircraftIconKind kind = aircraft_icon_kind(aircraft);
     const float bearing = aircraft_icon_bearing(aircraft);
 
@@ -725,7 +649,7 @@ void draw_aircraft_icon(lv_obj_t *canvas, int x, int y, const AircraftDetailsStr
         draw_segment(-3, 9, 3, 9);   // tail rotor/stabilizer
     } else {
         draw_segment(0, -10, 0, 8);  // fuselage
-        draw_segment(-9, 0, 9, 0);   // wings
+        draw_segment(-9, swept_wings ? 3 : 0, 9, swept_wings ? 3 : 0); // wings
         line_dsc.width = 1;
         draw_segment(-3, 6, 3, 6);   // tailplane
     }
@@ -869,7 +793,7 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
             y < ICON_RADIUS || y >= DISPLAY_HEIGHT - ICON_RADIUS) continue;
 
         lv_color_t color = altitude_color(ac.altitude);
-        draw_aircraft_icon(canvas, x, y, ac, color);
+        draw_aircraft_icon(canvas, x, y, ac, color, true);
 
         label_dsc.color = color;
         char idBuf[12];
@@ -997,6 +921,43 @@ bool display_ready() {
 
 void display_debug_line(const String &line) {
     Serial.println(line);
+    if (!s_display_ready || !s_startup_active) return;
+
+    for (uint8_t i = 0; i < STARTUP_LOG_LINES - 1; i++) {
+        s_startup_lines[i] = s_startup_lines[i + 1];
+    }
+    s_startup_lines[STARTUP_LOG_LINES - 1] = line;
+
+    if (!s_startup_log) {
+        s_startup_log = lv_obj_create(s_root);
+        lv_obj_remove_style_all(s_startup_log);
+        lv_obj_set_size(s_startup_log, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        lv_obj_clear_flag(s_startup_log, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_move_background(s_startup_log);
+
+        lv_obj_t *title = create_label(s_startup_log, &font_inter_bold_18, COLOR_TEXT_1, "ADSB MONITOR");
+        lv_obj_set_pos(title, 20, 24);
+        lv_obj_t *subtitle = create_label(s_startup_log, &font_inter_regular_14, COLOR_TEXT_2, "Starting up");
+        lv_obj_set_pos(subtitle, 20, 52);
+    }
+
+    String text;
+    for (uint8_t i = 0; i < STARTUP_LOG_LINES; i++) {
+        if (!s_startup_lines[i].isEmpty()) {
+            if (!text.isEmpty()) text += '\n';
+            text += s_startup_lines[i];
+        }
+    }
+
+    lv_obj_t *log = lv_obj_get_child(s_startup_log, 2);
+    if (!log) {
+        log = create_label(s_startup_log, &font_jetbrainsmono_medium_12, COLOR_TEXT_2, "");
+        lv_obj_set_width(log, DISPLAY_WIDTH - 40);
+        lv_label_set_long_mode(log, LV_LABEL_LONG_WRAP);
+        lv_obj_set_pos(log, 20, 92);
+    }
+    lv_label_set_text(log, text.c_str());
+    lv_refr_now(nullptr);
 }
 
 void display_init() {
