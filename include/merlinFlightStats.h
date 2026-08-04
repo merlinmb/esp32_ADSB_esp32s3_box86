@@ -13,7 +13,7 @@
 
 // Allocator that routes ArduinoJson memory to PSRAM instead of internal SRAM.
 // The T-Display-AMOLED has 8MB of PSRAM; internal heap is only ~300KB.
-struct SpiRamAllocator {
+struct SpiRamAllocator : ArduinoJson::Allocator {
     void* allocate(size_t size) {
         return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
@@ -24,7 +24,8 @@ struct SpiRamAllocator {
         return heap_caps_realloc(ptr, new_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
 };
-using SpiRamJsonDocument = BasicJsonDocument<SpiRamAllocator>;
+inline SpiRamAllocator _spiRamAllocator;
+using SpiRamJsonDocument = JsonDocument;
 
 inline const char* host = "192.168.1.48"; // Flight data source
 inline const char* path = "/data/aircraft.json";
@@ -33,9 +34,12 @@ inline const int port = 8080;
 inline const float myLat = 51.39513478804202;
 inline const float myLon = -1.338836382480781;
 
+constexpr bool VERBOSE_AIRCRAFT_JSON_DEBUG = false;
+
 struct AircraftDetailsStruct {
     String callsign;
     String type;
+    String category;
     int squawk;
     String route;
     int altitude;
@@ -48,6 +52,9 @@ struct AircraftDetailsStruct {
     float latitude;
     float longitude;
     float heading;
+    float track;
+    bool hasHeading;
+    bool hasTrack;
     bool identifierUnknown; // Flag to indicate if identifier is unknown
 };
 
@@ -71,7 +78,7 @@ inline FlightStats _flightStats;
 // --- FreeRTOS fetch-task globals ---
 // PSRAM-backed JSON document, allocated once at boot. 64KB is negligible
 // against the 8MB PSRAM and avoids per-cycle heap churn.
-inline SpiRamJsonDocument _flightDetailsJSONDoc(65536);
+inline SpiRamJsonDocument _flightDetailsJSONDoc(&_spiRamAllocator);
 
 // Staging struct — written exclusively by the fetch task on core 0.
 // Swapped into _flightStats under mutex when a fetch completes.
@@ -91,26 +98,25 @@ inline volatile bool _fetchInProgress = false;
 //#define DEG_TO_RAD 0.017453292519943295
 
 inline float haversine(float lat1, float lon1, float lat2, float lon2) {
-    
-    DEBUG_PRINTLN("Calculating haversine");
-    /*
-    DEBUG_PRINTLN(lat1);
-    DEBUG_PRINTLN(lon1);
-    DEBUG_PRINTLN(lat2);
-    DEBUG_PRINTLN(lon2);
-    */
+
+    if (VERBOSE_AIRCRAFT_JSON_DEBUG) {
+        DEBUG_PRINTLN("Calculating haversine");
+    }
     float dLat = radians(lat2 - lat1);
     float dLon = radians(lon2 - lon1);
-    DEBUG_PRINT("dLat: "); DEBUG_PRINTLNDEC(dLat, 6);
-    DEBUG_PRINT("dLon: "); DEBUG_PRINTLNDEC(dLon, 6);
-    
+
     float a = sin(dLat / 2) * sin(dLat / 2) +
               cos(radians(lat1)) * cos(radians(lat2)) *
               sin(dLon / 2) * sin(dLon / 2);
-    DEBUG_PRINT("a: "); DEBUG_PRINTLNDEC(a, 6);
-    
+
     float c = 2 * atan2(sqrtf(a), sqrtf(1 - a));
-    DEBUG_PRINT("c: "); DEBUG_PRINTLNDEC(c, 6);
+
+    if (VERBOSE_AIRCRAFT_JSON_DEBUG) {
+        DEBUG_PRINT("dLat: "); DEBUG_PRINTLNDEC(dLat, 6);
+        DEBUG_PRINT("dLon: "); DEBUG_PRINTLNDEC(dLon, 6);
+        DEBUG_PRINT("a: "); DEBUG_PRINTLNDEC(a, 6);
+        DEBUG_PRINT("c: "); DEBUG_PRINTLNDEC(c, 6);
+    }
 
     return EARTH_RADIUS_KM * c;
 }
@@ -155,10 +161,11 @@ inline bool fetchFlightData(const char* host, const char* path, const int port, 
     // Filter: only keep the fields we actually use in processFlightData().
     // ArduinoJson discards everything else before allocating heap, cutting
     // document memory by ~70-80% compared to parsing the full JSON.
-    DynamicJsonDocument filter(512);
+    JsonDocument filter;
     JsonObject filterAircraft = filter["aircraft"][0].to<JsonObject>();
     filterAircraft["callsign"]     = true;
     filterAircraft["type"]         = true;
+    filterAircraft["category"]     = true;
     filterAircraft["squawk"]       = true;
     filterAircraft["route"]        = true;
     filterAircraft["alt_baro"]     = true;
@@ -170,6 +177,7 @@ inline bool fetchFlightData(const char* host, const char* path, const int port, 
     filterAircraft["lat"]          = true;
     filterAircraft["lon"]          = true;
     filterAircraft["true_heading"] = true;
+    filterAircraft["track"]        = true;
 
     // Stream-parse directly from the TCP socket — no intermediate String buffer.
     DEBUG_PRINTLN("Streaming and parsing JSON");
@@ -184,6 +192,8 @@ inline bool fetchFlightData(const char* host, const char* path, const int port, 
 
 inline void printAircraft(AircraftDetailsStruct AircraftToPrint)
 {
+    if (!VERBOSE_AIRCRAFT_JSON_DEBUG) return;
+
     DEBUG_PRINTLN("-----------------------------------------------------------------");
     DEBUG_PRINTLN("Aircraft:     "+AircraftToPrint.identifier);
     DEBUG_PRINTLN("  Altitude:   "+String(AircraftToPrint.altitude));
@@ -251,10 +261,15 @@ inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
     int __currentAircraftIndex = 0;
     for (JsonObject plane : aircraft) {
 
-        DEBUG_PRINTLN("processFlightData:populating AircraftDetailsStructs");
+        if (__currentAircraftIndex >= (int)(sizeof(target.aircraft) / sizeof(target.aircraft[0]))) {
+            DEBUG_PRINTLN("Aircraft limit reached; ignoring remaining entries");
+            break;
+        }
+
         AircraftDetailsStruct __currentAircraft = {
             plane["callsign"] | "Unknown",
             plane["type"] | "Unknown",
+            plane["category"] | "",
             plane["squawk"].as<int>() | 0,
             plane["route"] | "Unknown",
             plane["alt_baro"] | 0,
@@ -267,11 +282,18 @@ inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
             plane["lat"].as<float>(),
             plane["lon"].as<float>(),
             plane["true_heading"].as<float>(),
+            plane["track"].as<float>(),
+            plane["true_heading"].is<float>(),
+            plane["track"].is<float>(),
             false
         };
 
-        if(__currentAircraft.callsign == "Unknown") {
-            __currentAircraft.identifierUnknown = true; // Set the flag if callsign is unknown
+        __currentAircraft.callsign.trim();
+        __currentAircraft.flight.trim();
+        if (__currentAircraft.callsign.length() == 0 || __currentAircraft.callsign == "Unknown") {
+            __currentAircraft.identifier = __currentAircraft.flight;
+            __currentAircraft.identifierUnknown = __currentAircraft.identifier.length() == 0 ||
+                __currentAircraft.identifier == "Unknown";
         } else {
             __currentAircraft.identifier = __currentAircraft.callsign;
         }
@@ -288,9 +310,7 @@ inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
             continue;
         }
         __currentAircraft.description.trim();
-        __currentAircraft.callsign.trim();
         __currentAircraft.route.trim();
-        __currentAircraft.flight.trim();
         __currentAircraft.identifier.trim();
 
 
@@ -326,8 +346,10 @@ inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
             target.farthestAircraft = __currentAircraftIndex;
             __farthestAircraftdistance = distance;
         }
-        if (isSquawkEmergency(__currentAircraft.squawk))
+        if (isSquawkEmergency(__currentAircraft.squawk) &&
+            target.emergencyCount < (int)(sizeof(target.emergencyAircraft) / sizeof(target.emergencyAircraft[0]))) {
             target.emergencyAircraft[target.emergencyCount++] = __currentAircraftIndex;
+        }
 
 
         __currentAircraftIndex++;

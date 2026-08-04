@@ -27,15 +27,12 @@
 #define MAXBRIGHTNESS 255
 #define MINBRIGHTNESS 0
 
-int _brightnesses[5] = {0, 51, 115, 192, 255};
-int _selectedBrightness = 4;
-
 #define location "51.39502, -1.3387" // 97 Enborne Road
 
 #define MCMDVERSION 1.4
 
-bool _brightnessHigh;
-byte _brightness = 100;
+bool _brightnessHigh = true;
+byte _brightness = MAXBRIGHTNESS;
 
 String _mqttPostFix = "";
 float _batteryVoltage = 0;
@@ -54,6 +51,7 @@ String _locationCode = "";
 
 #define UPDATE_WIFICHECK_INTERVAL_MILLISECS 30000 // Update every 1 min
 #define UPDATE_UI_FRAME_INTERVAL_MILLISECS 10000  // transition screen every ... milliseconds
+#define UPDATE_UI_RADAR_FRAME_INTERVAL_MILLISECS UPDATE_UI_FRAME_INTERVAL_MILLISECS
 #define UPDATE_ADSBS_INTERVAL_MILLISECS 30000     // Update every 30 seconds
 #define UPDATE_TIME_INTERVAL_MILLISECS 900        // Update every <1sec
 
@@ -121,25 +119,16 @@ String _lastMQTTMessage = "";
 
 void setBrightness(byte brightnessValue)
 {
-  DEBUG_PRINTLN("setBrightness: " + String(brightnessValue));
+  _brightnessHigh = brightnessValue > MINBRIGHTNESS;
+  _brightness = _brightnessHigh ? MAXBRIGHTNESS : MINBRIGHTNESS;
+  DEBUG_PRINTLN("setBrightness: " + String(_brightness));
 
-  display_set_brightness(brightnessValue);
-
-  for (int i = 0; i < 5; i++)
-  {
-    if (brightnessValue == _brightnesses[i])
-    {
-      _selectedBrightness = i;
-      break;
-    }
-  }
+  display_set_brightness(_brightness);
 }
 
 void toggleBrightness(bool isBright)
 {
-  _brightness = (isBright) ? MAXBRIGHTNESS : MINBRIGHTNESS;
-  setBrightness(_brightness);
-  _brightnessHigh = isBright;
+  setBrightness(isBright ? MAXBRIGHTNESS : MINBRIGHTNESS);
 }
 
 /***************************************************
@@ -171,11 +160,10 @@ bool parseConfigValue(String key, String value)
 
   if (key == "brightness")
   {
-    int __newVal = value.toInt();
-    if (_brightness != __newVal)
+    bool __newBrightnessHigh = value.toInt() > MINBRIGHTNESS;
+    if (_brightnessHigh != __newBrightnessHigh)
     {
-      _brightness = value.toInt();
-      setBrightness(_brightness);
+      toggleBrightness(__newBrightnessHigh);
     }
   }
 
@@ -221,6 +209,11 @@ bool parseConfigValue(String key, String value)
     }
   }
 
+  if (key == "scanline")
+  {
+    radarmap::s_scan_line_enabled = (value == "true");
+  }
+
   DEBUG_PRINTLN("parseConfigValue() - completed...");
 
   return true;
@@ -228,7 +221,7 @@ bool parseConfigValue(String key, String value)
 
 void setupSPIFFS()
 {
-  if (SPIFFS.begin())
+  if (SPIFFS.begin(true))
   {
     DEBUG_PRINTLN("SPIFFS: Mounted file system");
   }
@@ -289,6 +282,7 @@ void saveConfigValuesSPIFFS()
   writeStrtoFile(__configFile, "mapenabled", String(radarmap::s_enabled ? "true" : "false"));
   writeStrtoFile(__configFile, "mapstyle", String(radarmap::style_name(radarmap::s_style)));
   writeStrtoFile(__configFile, "maprange", String(radarmap::s_range_nmi, 1));
+  writeStrtoFile(__configFile, "scanline", String(radarmap::s_scan_line_enabled ? "true" : "false"));
 
   __configFile.close();
   DEBUG_PRINTLN("... Done");
@@ -342,17 +336,12 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     if (__newBrightness > MAXBRIGHTNESS)
       __newBrightness = MAXBRIGHTNESS;
 
-    _brightness = __newBrightness;
-    DEBUG_PRINTLN("Setting Brightness to: " + String(_brightness));
-    setBrightness(_brightness);
+    toggleBrightness(__newBrightness > MINBRIGHTNESS);
   }
 
   if (__incomingTopic == "cmnd/mcmddevices/brightnesspercentage")
   {
-    _brightness = __payloadString.toInt();
-    _brightness = map(_brightness, 0, 100, 0, 255);
-    DEBUG_PRINTLN("Setting Brightness to: " + String(_brightness));
-    setBrightness(_brightness);
+    toggleBrightness(__payloadString.toInt() > 0);
   }
 }
 void mqttCustomSubscribe() {}
@@ -367,40 +356,12 @@ void setupWebServer()
 
   _httpServer.on("/", []()
                  {
-					   String __infoStr = "<html><head>"+style;
-             __infoStr += "<script>  ";
-             __infoStr += "function checkFlipped() {      document.getElementById('flipscreen').value=document.getElementById('flipscreenHidden').checked;  }";
-             __infoStr += "function submitForm() { checkFlipped();    document.getElementById('myForm').submit(); }";
-             __infoStr +="</script>";
-             __infoStr += "</head>";
-					   __infoStr += "<div align=left><H1><i>" + String(MQTT_CLIENTNAME) + "</i></H1>";
-             __infoStr += loginIndex+loginIndex2;
-
-					   __infoStr += "<hr class='new5'>";
-             __infoStr += "<form action='/set' id='myForm'>";
-
-
-             __infoStr += "Aircraft JSON URL: <input for='jsonURI' data-lpignore='jsonURI' name='jsonURI' type='text' value='"+_locationCode+"' width=80%><br>";
-             __infoStr +=  "<br>";
-
-            __infoStr += "Screen brightness:&nbsp;&nbsp;";
-            __infoStr += "<select id='brightness' name='brightness'>";
-            for (int i = 0; i < 5; i++)
-            {
-                __infoStr += "<option value='"+String(_brightnesses[i])+"'"+ (_selectedBrightness==i?"selected='selected'":"") +">"+String(map(_brightnesses[i], 0, 255, 0, 100))+"%</option>";
-            }
-
-            __infoStr += "</select><br>";
-            __infoStr += "<br>";
-
-            __infoStr += "Radar background map:&nbsp;&nbsp;";
-            __infoStr += "<select id='mapenabled' name='mapenabled'>";
-            __infoStr += "<option value='true'" + String(radarmap::s_enabled ? " selected='selected'" : "") + ">On</option>";
-            __infoStr += "<option value='false'" + String(!radarmap::s_enabled ? " selected='selected'" : "") + ">Off</option>";
-            __infoStr += "</select><br>";
-
-            __infoStr += "Map style:&nbsp;&nbsp;";
-            __infoStr += "<select id='mapstyle' name='mapstyle'>";
+             String __infoStr = "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'>" + style;
+             __infoStr += "<script>function syncToggles(){['brightness','mapenabled','scanline'].forEach(function(id){document.getElementById(id+'Value').value=document.getElementById(id).checked?'true':'false';});document.getElementById('brightnessValue').value=document.getElementById('brightness').checked?'255':'0';}</script></head><body><main class='shell'><header class='masthead'><div class='brand'>FLIGHT RADAR<small>DEVICE CONFIGURATION</small></div><div class='badge'>ONLINE</div></header>";
+             __infoStr += "<form action='/set' id='myForm' onsubmit='syncToggles()'>";
+             __infoStr += "<section class='panel'><h2>DATA SOURCE</h2><div class='field'><label for='jsonURI'>Aircraft JSON URL</label><input id='jsonURI' data-lpignore='true' name='jsonURI' type='text' value='" + _locationCode + "'></div></section>";
+             __infoStr += "<section class='panel'><h2>DISPLAY</h2><input type='hidden' id='brightnessValue' name='brightness'><label class='toggle'><span>Screen backlight</span><input id='brightness' type='checkbox'" + String(_brightnessHigh ? " checked" : "") + "><i class='switch'></i></label><input type='hidden' id='scanlineValue' name='scanline'><label class='toggle'><span>Radar scanning line</span><input id='scanline' type='checkbox'" + String(radarmap::s_scan_line_enabled ? " checked" : "") + "><i class='switch'></i></label></section>";
+             __infoStr += "<section class='panel'><h2>RADAR MAP</h2><input type='hidden' id='mapenabledValue' name='mapenabled'><label class='toggle'><span>Background map</span><input id='mapenabled' type='checkbox'" + String(radarmap::s_enabled ? " checked" : "") + "><i class='switch'></i></label><div class='field'><label for='mapstyle'>Map style</label><select id='mapstyle' name='mapstyle'>";
             {
               const radarmap::Style __styles[] = {radarmap::Style::DARK_GRAY, radarmap::Style::LIGHT_GRAY, radarmap::Style::STREETS, radarmap::Style::IMAGERY, radarmap::Style::STREETS_HIGHLIGHT};
               const char *__styleLabels[] = {"Dark Gray", "Light Gray", "Streets", "Imagery", "Streets (black bg, highlighted roads)"};
@@ -604,11 +565,7 @@ void toggleSysInfoFrame()
 void rotateBrightness()
 {
   DEBUG_PRINTLN("rotateBrightness");
-  _selectedBrightness--;
-  if (_selectedBrightness < 0)
-    _selectedBrightness = 4;
-
-  setBrightness(_brightnesses[_selectedBrightness]);
+  toggleBrightness(!_brightnessHigh);
 }
 
 void advanceFrame()
@@ -632,32 +589,6 @@ void onTouchRotateBrightness() { rotateBrightness(); }
 void onTouchTriggerFetch() { triggerFetchFromButton(); }
 void onTouchToggleSysInfo() { toggleSysInfoFrame(); }
 void onTouchReboot() { rebootESP(); }
-
-/***************************************************
-  ADS-B fetch / render orchestration
-****************************************************/
-
-void updateFlightStats()
-{
-  DEBUG_PRINTLN("updateFlightStats");
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    DEBUG_PRINTLN("WiFi Connected");
-    DEBUG_PRINTLN("updateFlightStats.fetchFlightData");
-    DisplayOut("Fetching flight data");
-
-    DisplayOut("Parsing flight data");
-    if (fetchFlightData(host, path, port, _flightDetailsJSONDoc))
-    {
-      processFlightData(_flightDetailsJSONDoc, _flightStats);
-      printFlightStats();
-    }
-    else
-    {
-      DEBUG_PRINTLN("Failed to fetch flight data!");
-    }
-  }
-}
 
 void setupWifi()
 {
@@ -686,7 +617,6 @@ void fetchTask(void *pvParameters)
 {
   for (;;)
   {
-    // Block indefinitely until xTaskNotifyGive() is called from the main loop.
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
     if (WiFi.status() != WL_CONNECTED)
@@ -702,13 +632,11 @@ void fetchTask(void *pvParameters)
     {
       processFlightData(_flightDetailsJSONDoc, _flightStatsStaging);
 
-      // Swap staging into live struct under mutex so the render path
-      // on core 1 never sees a partially-updated _flightStats.
       xSemaphoreTake(_flightStatsMutex, portMAX_DELAY);
       _flightStats = _flightStatsStaging;
       xSemaphoreGive(_flightStatsMutex);
 
-      _spritesNeedUpdate = true; // signal loop() to re-render from new data
+      _spritesNeedUpdate = true;
       DEBUG_PRINTLN("fetchTask: data updated");
     }
     else
@@ -791,12 +719,18 @@ void setup()
   // Arduino WiFi/lwip API is designed for core 1 and relies on the IDLE
   // task there for cooperative yielding. Running it on core 0 starves
   // the core 0 IDLE task and triggers the task watchdog.
+  //
+  // Priority is BELOW loopTask (1) so a blocking fetch (TCP/TLS/JSON parse,
+  // several seconds) never preempts LVGL rendering or touch I2C polling —
+  // it only runs when loopTask yields/blocks. Equal priority previously
+  // caused round-robin time-slicing with loopTask, stalling lv_timer_handler()
+  // and I2C mid-transaction (visible as RGB panel shift + I2C bus errors).
   xTaskCreatePinnedToCore(
     fetchTask,        // task function
     "fetchTask",      // name (debug)
     8192,             // stack bytes
     nullptr,          // parameter
-    1,                // priority (same as loop task)
+    0,                // priority — below loopTask, never preempts rendering
     &_fetchTaskHandle,// handle — used by loop to notify
     1                 // core 1 — same core as loop(), required for WiFiClient
   );
@@ -811,6 +745,7 @@ void setup()
 void loop()
 {
   lv_timer_handler();
+  delay(2);
 
   if (_initComplete && !_updatingFirmware)
   {
@@ -850,7 +785,11 @@ void loop()
       }
     }
 
-    if ((_runCurrent - _runFrame >= UPDATE_UI_FRAME_INTERVAL_MILLISECS) || _forceUpdate || _forceRender)
+    unsigned long frameInterval = (_currentFrame == FRAME_RADAR)
+      ? UPDATE_UI_RADAR_FRAME_INTERVAL_MILLISECS
+      : UPDATE_UI_FRAME_INTERVAL_MILLISECS;
+
+    if ((_runCurrent - _runFrame >= frameInterval) || _forceUpdate || _forceRender)
     {
       DEBUG_PRINTLN("Current Frame: " + String(_currentFrame));
 
@@ -873,7 +812,9 @@ void loop()
     if (_runCurrent - _runTime >= UPDATE_TIME_INTERVAL_MILLISECS)
     {
       updateLocalTime();
-      display_update_clock();
+      char clockText[10];
+      snprintf(clockText, sizeof(clockText), "%s:%s:%s", timeHour, timeMin, timeSec);
+      display_update_clock(clockText);
       _runTime = millis();
     }
   }

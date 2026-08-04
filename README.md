@@ -105,11 +105,11 @@ There are no physical buttons — all interaction is via tap zones on the touchs
 
 | Gesture | Zone | Action |
 |---------|------|--------|
-| Tap | Left half | Advance to the next screen |
-| Double-tap | Left half | Force an immediate ADS-B data refresh |
-| Tap | Right half | Cycle brightness level |
-| Double-tap | Right half | Jump to the system info screen |
-| Long-press | Right half | Reboot the device |
+| Tap | Left half | Toggle the backlight on or off |
+| Double-tap | Left half | Jump to the system info screen |
+| Long-press | Left half | Reboot the device |
+| Tap | Right half | Advance to the next screen |
+| Double-tap | Right half | Force an immediate ADS-B data refresh |
 
 ## Development
 

@@ -123,10 +123,11 @@ String macToStr(const uint8_t *mac)
 
 void updateTimeString()
 {
-	//_ntpDate = String(year(_unixTime)) + "/" + String(month(_unixTime)) + "/" + String(day(_unixTime));
-	_ntpDate = _timeClient.getFormattedDate();
-	_ntpDate = _ntpDate.substring(0, 16);
-	_ntpDate.trim();
+	time_t timestamp = _timeClient.getEpochTime();
+	char dateBuffer[17];
+	snprintf(dateBuffer, sizeof(dateBuffer), "%04d-%02d-%02d %02d:%02d",
+			 year(timestamp), month(timestamp), day(timestamp), hour(timestamp), minute(timestamp));
+	_ntpDate = dateBuffer;
 	DEBUG_PRINTLN(_ntpDate);
 }
 

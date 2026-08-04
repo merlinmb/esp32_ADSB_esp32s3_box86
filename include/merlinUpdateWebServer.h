@@ -25,25 +25,7 @@
 
 /* Style */
 String style =
-"<style>#file-input,input{width:40%;height:40px;border-radius:4px;margin:5px auto;font-size:15px}"
-"input{background:#f1f1f1;border:0;padding:0 5px}body{background:#3498db;font-family:sans-serif;font-size:14px;color:#777}"
-"select{background:#f1f1f1;border:0;padding:0 5px}body{background:#3498db;font-family:sans-serif;font-size:14px;color:#777}"
-"#file-input{padding:0;border:1px solid #ddd;line-height:44px;text-align:center;display:block;cursor:pointer}"
-"#bar,#prgbar{background-color:#f1f1f1;border-radius:10px}#bar{background-color:#3498db;width:0%;height:10px}"
-"div{background:#fff;max-width:600px;margin:5px auto;padding:5px;border-radius:5px;text-align:left;font-family:sans-serif;font-size:14px;}"
-"form{background:#fff;max-width:600px;margin:5px auto;padding:5px;border-radius:5px;text-align:center;font-family:sans-serif;font-size:14px;}"
-".btn{background:#3498db;color:#fff;cursor:pointer}"
-"svg[data-lastpass-icon=true]{visibility:none;display: none !important;}"
-"div[data-lastpass-icon-root=true]{visibility:none;display: none !important;}"
-"div[data-lastpass-icon-root]{visibility:none;display: none !important;}"
-"div[data-lastpass-root]{visibility:none;display: none !important;}"
-"div[data-lastpass-infield]{visibility:none;display: none !important;}"
-"div[data-lastpass-infield='true']{visibility:none;display: none !important;}"
-"hr.new5 { border: 1px solid #3498db;  }"
-
-
-
-"</style>";
+"<style>:root{color-scheme:dark;--bg:#061116;--panel:#0b1c22;--panel2:#10272d;--line:#24434a;--text:#e7f3f2;--muted:#8aa5a5;--accent:#3ce0ae;--accent2:#4dbde8}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -15%,#123842 0,#061116 48%);color:var(--text);font:15px Arial,sans-serif;min-height:100vh}a{color:var(--accent2)}.shell{max-width:760px;margin:0 auto;padding:24px 16px 40px}.masthead{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding:0 0 18px;margin-bottom:18px}.brand{letter-spacing:2px;font-weight:bold;font-size:18px;color:var(--accent)}.brand small{display:block;color:var(--muted);font-size:10px;letter-spacing:1.5px;margin-top:5px}.badge{border:1px solid var(--accent);color:var(--accent);font-size:11px;letter-spacing:1px;padding:5px 8px}.panel{border:1px solid var(--line);background:rgba(11,28,34,.94);padding:18px;margin:14px 0}.panel h2{font-size:12px;letter-spacing:1.4px;color:var(--accent);margin:0 0 16px}.field{margin:0 0 15px}.field:last-child{margin-bottom:0}.field label:not(.toggle){display:block;color:var(--muted);font-size:12px;letter-spacing:.5px;margin:0 0 7px}input[type=text],input[type=number],select{width:100%;height:42px;background:#061116;color:var(--text);border:1px solid var(--line);padding:0 11px;font-size:15px}input:focus,select:focus{outline:1px solid var(--accent);border-color:var(--accent)}.toggle{display:flex;align-items:center;justify-content:space-between;gap:16px;cursor:pointer;min-height:42px;color:var(--text)}.toggle span:first-child{font-size:14px}.switch{width:44px;height:24px;border:1px solid var(--line);background:#061116;position:relative;flex:0 0 auto}.switch:after{content:'';position:absolute;width:16px;height:16px;left:3px;top:3px;background:var(--muted);transition:transform .18s,background .18s}input[type=checkbox]{position:absolute;opacity:0;pointer-events:none}input[type=checkbox]:checked+.switch{border-color:var(--accent);background:#123a36}input[type=checkbox]:checked+.switch:after{transform:translateX(18px);background:var(--accent)}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}.btn{min-height:42px;border:1px solid var(--accent);background:var(--accent);color:#04201a;padding:0 16px;font-weight:bold;letter-spacing:.5px;cursor:pointer}.btn.secondary{background:transparent;color:var(--accent2);border-color:var(--accent2)}.status{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line);margin-top:14px}.status div{background:var(--panel2);padding:12px}.status span{display:block;color:var(--muted);font-size:10px;letter-spacing:1px;margin-bottom:5px}.status strong{font-size:13px;word-break:break-word}#file-input{display:block;border:1px dashed var(--accent2);padding:12px;color:var(--accent2);cursor:pointer;text-align:center}#bar,#prgbar{background:#061116;height:8px}#bar{background:var(--accent);width:0%}@media(max-width:520px){.shell{padding:16px 12px 28px}.status{grid-template-columns:1fr}.panel{padding:15px}}</style>";
 
 /* Login page */
 String loginIndex =

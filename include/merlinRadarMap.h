@@ -38,8 +38,12 @@ constexpr int MAP_SIZE_PX = 480; // matches DISPLAY_WIDTH/HEIGHT
 // would land short of the actual outer ring.
 constexpr int RADAR_OUTER_RADIUS_PX = MAP_SIZE_PX / 2 - 30; // mirrors radar_outer_radius()
 
-constexpr const char *CACHE_PATH = "/radarmap.jpg";
+// Bump this name when the map rendering changes so an old cache cannot hide
+// an updated style after a firmware upload.
+constexpr const char *CACHE_PATH = "/radarmap-v2.jpg";
+constexpr const char *CACHE_TEMP_PATH = "/radarmap-v2.tmp";
 constexpr const char *ARCGIS_HOST = "services.arcgisonline.com";
+constexpr const char *ARCGIS_FALLBACK_HOST = "server.arcgisonline.com";
 
 enum class Style : uint8_t {
     DARK_GRAY = 0,
@@ -59,7 +63,7 @@ inline const char *style_path(Style s) {
         case Style::STREETS_HIGHLIGHT: return "World_Street_Map";
         case Style::IMAGERY:           return "World_Imagery";
         case Style::DARK_GRAY:
-        default:                       return "Canvas/World_Dark_Gray_Base";
+        default:                       return "World_Street_Map";
     }
 }
 
@@ -87,6 +91,7 @@ inline Style style_from_name(const String &name) {
 inline bool s_enabled = true;
 inline Style s_style = Style::DARK_GRAY;
 inline float s_range_nmi = 40.0f; // ground distance (radius) shown at the radar's outer ring
+inline bool s_scan_line_enabled = false;
 
 inline lv_color_t *s_map_buf = nullptr; // RGB565, MAP_SIZE_PX x MAP_SIZE_PX, PSRAM
 inline bool s_map_ready = false;
@@ -106,26 +111,31 @@ inline size_t jpg_input(JDEC *jd, uint8_t *buff, size_t ndata) {
     return src->file.read(buff, ndata);
 }
 
-// STREETS_HIGHLIGHT remap: recolors Esri's World_Street_Map tiles into a
-// black-background radar-style backdrop. Thresholds were picked by sampling
-// real tile pixels (roads are a warm salmon/red-brown fill+outline, water is
-// a flat light blue, label text is near-black low-saturation, everything
-// else — land, vegetation, buildings — is tan/green and gets dropped to
-// black) — not derived from any documented Esri color spec, so a future
-// basemap update could shift them; the four output colors below stay
-// visually distinct from each other if that happens.
+// Recolor Esri's World_Street_Map into a dark, road-focused basemap. The
+// Canvas dark base service is intentionally sparse and leaves the radar
+// background almost black at this scale, so the street service supplies the
+// road detail and this palette keeps it visually quiet beneath the sweep.
 constexpr uint32_t ROAD_HIGHLIGHT_COLOR = 0x00E5FF;  // cyan
 constexpr uint32_t WATER_HIGHLIGHT_COLOR = 0x1E5090; // dark blue
 constexpr uint32_t LABEL_HIGHLIGHT_COLOR = 0xFFFFFF; // white
+constexpr uint32_t ROAD_DARK_COLOR = 0x38464C;
+constexpr uint32_t WATER_DARK_COLOR = 0x102A38;
+constexpr uint32_t LABEL_DARK_COLOR = 0x89949A;
 
-inline lv_color_t remap_streets_highlight(uint8_t r, uint8_t g, uint8_t b) {
+inline lv_color_t remap_streets(uint8_t r, uint8_t g, uint8_t b, bool highlight) {
     bool is_water = (int)b > (int)r + 15;
-    bool is_road = !is_water && (int)r > (int)b + 55 && r >= g;
+    bool is_road = !is_water && (int)r > (int)b + 20 && r >= g;
     bool is_label = !is_water && !is_road && r < 60 && g < 60 && b < 60;
 
-    if (is_road) return lv_color_hex(ROAD_HIGHLIGHT_COLOR);
-    if (is_water) return lv_color_hex(WATER_HIGHLIGHT_COLOR);
-    if (is_label) return lv_color_hex(LABEL_HIGHLIGHT_COLOR);
+    if (highlight) {
+        if (is_road) return lv_color_hex(ROAD_HIGHLIGHT_COLOR);
+        if (is_water) return lv_color_hex(WATER_HIGHLIGHT_COLOR);
+        if (is_label) return lv_color_hex(LABEL_HIGHLIGHT_COLOR);
+    } else {
+        if (is_road) return lv_color_hex(ROAD_DARK_COLOR);
+        if (is_water) return lv_color_hex(WATER_DARK_COLOR);
+        if (is_label) return lv_color_hex(LABEL_DARK_COLOR);
+    }
     return lv_color_hex(0x000000);
 }
 
@@ -133,6 +143,7 @@ inline int jpg_output(JDEC *jd, void *bitmap, JRECT *rect) {
     (void)jd;
     const uint8_t *src = (const uint8_t *)bitmap; // RGB888 rows (JD_FORMAT 0)
     const int row_width = rect->right - rect->left + 1;
+    const bool remap = (s_style == Style::DARK_GRAY || s_style == Style::STREETS_HIGHLIGHT);
     const bool highlight = (s_style == Style::STREETS_HIGHLIGHT);
 
     for (int y = rect->top; y <= rect->bottom; y++) {
@@ -142,7 +153,7 @@ inline int jpg_output(JDEC *jd, void *bitmap, JRECT *rect) {
             if (rect->left + x >= MAP_SIZE_PX) break;
             uint8_t r = src[0], g = src[1], b = src[2];
             src += 3;
-            dst_row[x] = highlight ? remap_streets_highlight(r, g, b) : lv_color_make(r, g, b);
+            dst_row[x] = remap ? remap_streets(r, g, b, highlight) : lv_color_make(r, g, b);
         }
     }
     return 1;
@@ -166,6 +177,7 @@ inline bool decode_cached_jpeg() {
     if (res != JDR_OK) {
         DEBUG_PRINTLN("radarmap: jd_prepare failed: " + String((int)res));
         f.close();
+        SPIFFS.remove(CACHE_PATH);
         return false;
     }
 
@@ -174,6 +186,7 @@ inline bool decode_cached_jpeg() {
 
     if (res != JDR_OK) {
         DEBUG_PRINTLN("radarmap: jd_decomp failed: " + String((int)res));
+        SPIFFS.remove(CACHE_PATH);
         return false;
     }
 
@@ -206,14 +219,27 @@ inline bool fetch_and_cache() {
     client.setInsecure(); // no cert pinning available on-device; matches project's existing WiFiClientSecure usage
     client.setTimeout(15000);
 
-    DEBUG_PRINTLN("radarmap: connecting to " + String(ARCGIS_HOST));
-    if (!client.connect(ARCGIS_HOST, 443)) {
+    const char *connected_host = nullptr;
+    const char *hosts[] = {ARCGIS_HOST, ARCGIS_FALLBACK_HOST};
+    for (const char *host : hosts) {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            DEBUG_PRINTLN("radarmap: connecting to " + String(host));
+            if (client.connect(host, 443)) {
+                connected_host = host;
+                break;
+            }
+            client.stop();
+            delay(250);
+        }
+        if (connected_host) break;
+    }
+    if (!connected_host) {
         DEBUG_PRINTLN("radarmap: connect failed");
         return false;
     }
 
     client.print(String("GET ") + pathBuf + " HTTP/1.1\r\n" +
-                 "Host: " + ARCGIS_HOST + "\r\n" +
+                 "Host: " + connected_host + "\r\n" +
                  "Connection: close\r\n\r\n");
 
     unsigned long start = millis();
@@ -238,7 +264,8 @@ inline bool fetch_and_cache() {
         if (line == "\r") break;
     }
 
-    File f = SPIFFS.open(CACHE_PATH, FILE_WRITE);
+    SPIFFS.remove(CACHE_TEMP_PATH);
+    File f = SPIFFS.open(CACHE_TEMP_PATH, FILE_WRITE);
     if (!f) {
         DEBUG_PRINTLN("radarmap: failed to open cache file for write");
         client.stop();
@@ -263,8 +290,14 @@ inline bool fetch_and_cache() {
     f.close();
     client.stop();
 
+    if (total == 0 || !SPIFFS.rename(CACHE_TEMP_PATH, CACHE_PATH)) {
+        SPIFFS.remove(CACHE_TEMP_PATH);
+        DEBUG_PRINTLN("radarmap: failed to update cache");
+        return false;
+    }
+
     DEBUG_PRINTLN("radarmap: fetched " + String(total) + " bytes");
-    return total > 0;
+    return true;
 }
 
 // Call once at boot, after WiFi + SPIFFS are up. Loads from SPIFFS cache if
@@ -302,10 +335,28 @@ inline void init() {
 // current style/range/enabled settings. Used by the webserver's "refresh
 // map" action (e.g. after the device moved, or a style/range change).
 inline bool refresh() {
-    if (SPIFFS.exists(CACHE_PATH)) {
-        SPIFFS.remove(CACHE_PATH);
+    SPIFFS.remove(CACHE_TEMP_PATH);
+    s_map_ready = false;
+
+    if (!s_enabled) {
+        DEBUG_PRINTLN("radarmap: disabled via config");
+        return false;
     }
-    init();
+
+    if (!s_map_buf) {
+        s_map_buf = (lv_color_t *)heap_caps_malloc(
+            (size_t)MAP_SIZE_PX * MAP_SIZE_PX * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    }
+    if (!s_map_buf) {
+        DEBUG_PRINTLN("radarmap: PSRAM alloc failed");
+        return false;
+    }
+
+    if (WiFi.status() == WL_CONNECTED && fetch_and_cache() && decode_cached_jpeg()) {
+        s_map_ready = true;
+    } else {
+        DEBUG_PRINTLN("radarmap: refresh failed, retained previous cache");
+    }
     return s_map_ready;
 }
 

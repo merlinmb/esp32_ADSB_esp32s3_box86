@@ -8,11 +8,14 @@
 #include <WiFi.h>
 #include <lvgl.h>
 #include <TimeLib.h>
+#include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include <esp_heap_caps.h>
 
-// Corrected ST7701 init: 0x20 = INVOFF (not 0x21 IPS inversion), 0x50 = RGB565 (not 0x60 RGB666)
+#include "ui_fonts.h"
+
+// ST7701 setup for the ESP32-4848S040 RGB panel.
 static const uint8_t st7701_init_corrected[] = {
     BEGIN_WRITE,
     WRITE_COMMAND_8, 0xFF,
@@ -21,7 +24,7 @@ static const uint8_t st7701_init_corrected[] = {
     WRITE_C8_D16, 0xC0, 0x3B, 0x00,
     WRITE_C8_D16, 0xC1, 0x0D, 0x02,
     WRITE_C8_D16, 0xC2, 0x31, 0x05,
-    WRITE_C8_D8, 0xCD, 0x08,
+    WRITE_C8_D8, 0xCD, 0x00,
 
     WRITE_COMMAND_8, 0xB0, // Positive Voltage Gamma Control
     WRITE_BYTES, 16,
@@ -111,8 +114,7 @@ static const uint8_t st7701_init_corrected[] = {
     WRITE_COMMAND_8, 0xFF,
     WRITE_BYTES, 5, 0x77, 0x01, 0x00, 0x00, 0x00,
 
-    WRITE_COMMAND_8, 0x20,   // INVOFF — was 0x21 (IPS inversion), causing all colours to be inverted
-    WRITE_C8_D8, 0x3A, 0x50, // RGB565 — was 0x60 (RGB666), mismatched with 16-bit framebuffer
+    WRITE_C8_D8, 0x3A, 0x60, // RGB666, required by the ESP32-4848S040 RGB interface
 
     WRITE_COMMAND_8, 0x11, // Sleep Out
     END_WRITE,
@@ -150,7 +152,8 @@ static Arduino_ESP32RGBPanel *s_rgb_bus = new Arduino_ESP32RGBPanel(
     4  /* B0 */, 5  /* B1 */, 6  /* B2 */, 7  /* B3 */, 15 /* B4 */,
     1  /* hsync_polarity */, 10 /* hsync_front_porch */, 8 /* hsync_pulse_width */, 50 /* hsync_back_porch */,
     1  /* vsync_polarity */, 10 /* vsync_front_porch */, 8 /* vsync_pulse_width */, 20 /* vsync_back_porch */,
-    0  /* pclk_active_neg */, 12000000 /* prefer_speed */);
+    0  /* pclk_active_neg */, 12000000 /* prefer_speed */, false /* useBigEndian */,
+    0  /* de_idle_high */, 0 /* pclk_idle_high */, DISPLAY_WIDTH * 10 /* bounce buffer pixels */);
 
 static Arduino_RGB_Display *s_gfx = new Arduino_RGB_Display(
     DISPLAY_WIDTH, DISPLAY_HEIGHT, s_rgb_bus, 0 /* rotation */, true /* auto_flush */,
@@ -193,11 +196,38 @@ static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t 
     lv_disp_flush_ready(drv);
 }
 
+// The GT911 has no wired RST/INT (TOUCH_RST/TOUCH_INT = -1), so it isn't
+// hardware-reset at boot. If it ever comes up (or the I2C peripheral gets
+// left) in a bad state, every Wire transaction fails with
+// ESP_ERR_INVALID_STATE forever, since nothing else re-inits the bus.
+// Wire.begin() re-drives SDA/SCL and resets the I2C peripheral's internal
+// state machine, so re-running it after a run of consecutive failures
+// recovers a wedged bus without needing a physical reset line.
+static void recover_i2c_bus_if_wedged() {
+    static uint8_t s_consecutive_failures = 0;
+    constexpr uint8_t RECOVER_AFTER_FAILURES = 5;
+
+    Wire.beginTransmission(GT911_ADDR1);
+    uint8_t err = Wire.endTransmission();
+
+    if (err == 0) {
+        s_consecutive_failures = 0;
+        return;
+    }
+
+    if (++s_consecutive_failures >= RECOVER_AFTER_FAILURES) {
+        Wire.end();
+        Wire.begin(TOUCH_SDA, TOUCH_SCL);
+        s_consecutive_failures = 0;
+    }
+}
+
 static void lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     static bool          s_was_touched  = false;
     static unsigned long s_touch_down_ms = 0;
     static constexpr unsigned long DEBOUNCE_MS = 50;
 
+    recover_i2c_bus_if_wedged();
     s_ts.read();
     if (s_ts.isTouched) {
         unsigned long now_ms = millis();
@@ -270,10 +300,10 @@ void left_zone_click_cb(lv_event_t *e) {
     unsigned long now_ms = millis();
     if (now_ms - s_last_left_tap_ms <= DOUBLE_TAP_WINDOW_MS) {
         s_last_left_tap_ms = 0;
-        onTouchTriggerFetch();
+        onTouchToggleSysInfo();
     } else {
         s_last_left_tap_ms = now_ms;
-        onTouchAdvanceFrame();
+        onTouchRotateBrightness();
     }
 }
 
@@ -281,14 +311,14 @@ void right_zone_click_cb(lv_event_t *e) {
     unsigned long now_ms = millis();
     if (now_ms - s_last_right_tap_ms <= DOUBLE_TAP_WINDOW_MS) {
         s_last_right_tap_ms = 0;
-        onTouchToggleSysInfo();
+        onTouchTriggerFetch();
     } else {
         s_last_right_tap_ms = now_ms;
-        onTouchRotateBrightness();
+        onTouchAdvanceFrame();
     }
 }
 
-void right_zone_long_press_cb(lv_event_t *e) {
+void left_zone_long_press_cb(lv_event_t *e) {
     onTouchReboot();
 }
 
@@ -300,6 +330,7 @@ void create_touch_zones() {
     lv_obj_add_flag(s_touch_zone_left, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(s_touch_zone_left, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_touch_zone_left, left_zone_click_cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(s_touch_zone_left, left_zone_long_press_cb, LV_EVENT_LONG_PRESSED, nullptr);
 
     s_touch_zone_right = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_touch_zone_right);
@@ -308,7 +339,6 @@ void create_touch_zones() {
     lv_obj_add_flag(s_touch_zone_right, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(s_touch_zone_right, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_touch_zone_right, right_zone_click_cb, LV_EVENT_CLICKED, nullptr);
-    lv_obj_add_event_cb(s_touch_zone_right, right_zone_long_press_cb, LV_EVENT_LONG_PRESSED, nullptr);
 }
 
 lv_color_t altitude_color(int altitude) {
@@ -364,35 +394,82 @@ lv_obj_t *begin_content() {
 }
 
 void row_label(lv_obj_t *parent, int y, const char *label, const char *value, lv_color_t value_color) {
-    lv_obj_t *l = create_label(parent, &lv_font_montserrat_16, COLOR_TEXT_2, label);
+    lv_obj_t *l = create_label(parent, &font_inter_regular_14, COLOR_TEXT_2, label);
     lv_obj_set_pos(l, 20, y);
-    lv_obj_t *v = create_label(parent, &lv_font_montserrat_16, value_color, value);
+    lv_obj_t *v = create_label(parent, &font_inter_semibold_14, value_color, value);
     lv_obj_set_pos(v, 200, y);
+}
+
+void render_screen_header(lv_obj_t *parent, const char *eyebrow, const char *title) {
+    lv_obj_t *accent = lv_obj_create(parent);
+    lv_obj_remove_style_all(accent);
+    lv_obj_set_size(accent, 5, 42);
+    lv_obj_set_pos(accent, 20, 22);
+    lv_obj_set_style_bg_color(accent, COLOR_CYAN, 0);
+
+    lv_obj_t *eyebrow_label = create_label(parent, &font_inter_regular_12, COLOR_TEXT_2, eyebrow);
+    lv_obj_set_pos(eyebrow_label, 38, 21);
+    lv_obj_t *title_label = create_label(parent, &font_inter_bold_18, COLOR_TEXT_1, title);
+    lv_obj_set_pos(title_label, 38, 38);
+
+    lv_obj_t *rule = lv_obj_create(parent);
+    lv_obj_remove_style_all(rule);
+    lv_obj_set_size(rule, DISPLAY_WIDTH - 40, 1);
+    lv_obj_set_pos(rule, 20, 78);
+    lv_obj_set_style_bg_color(rule, COLOR_TEXT_3, 0);
+}
+
+lv_obj_t *create_metric_panel(lv_obj_t *parent, int x, int y, int width, int height) {
+    lv_obj_t *panel = lv_obj_create(parent);
+    lv_obj_set_size(panel, width, height);
+    lv_obj_set_pos(panel, x, y);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x111520), 0);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x252c3e), 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_radius(panel, 4, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    return panel;
+}
+
+void metric_label(lv_obj_t *parent, int x, int y, const char *label, const char *value, lv_color_t value_color) {
+    lv_obj_t *label_obj = create_label(parent, &font_inter_regular_12, COLOR_TEXT_2, label);
+    lv_obj_set_pos(label_obj, x, y);
+    lv_obj_t *value_obj = create_label(parent, &font_inter_semibold_14, value_color, value);
+    lv_obj_set_pos(value_obj, x, y + 17);
+}
+
+const char *status_indicator(const String &status) {
+    String normalized = status;
+    normalized.toLowerCase();
+    if (normalized == "ascending") return "UP";
+    if (normalized == "descending") return "DOWN";
+    return "LEVEL";
 }
 
 void render_sysinfo(lv_obj_t *parent, const FlightStats &stats) {
     (void)stats;
-    create_label(parent, &lv_font_montserrat_20, COLOR_CYAN, "Aircraft Tracker");
-
-    float batteryVoltage = (analogRead(4) * 2 * 3.3f * 1000) / 4096;
-    char battStr[24];
-    snprintf(battStr, sizeof(battStr), "%.1fV %.0f%%", batteryVoltage / 1000, batteryVoltage / 1000 / 5.0f * 100);
+    render_screen_header(parent, "SYSTEM STATUS", "Aircraft Tracker");
 
     char rssiStr[8];
     snprintf(rssiStr, sizeof(rssiStr), "%d%%", (int)WiFi.RSSI());
     char heapStr[16];
     snprintf(heapStr, sizeof(heapStr), "%u", (unsigned)ESP.getFreeHeap());
 
-    row_label(parent, 60, "WiFi", WiFi.SSID().c_str(), COLOR_TEXT_1);
-    row_label(parent, 90, "IP", WiFi.localIP().toString().c_str(), COLOR_TEXT_1);
-    row_label(parent, 120, "Signal", rssiStr, COLOR_TEXT_1);
-    row_label(parent, 150, "Battery", battStr, COLOR_TEXT_1);
-    row_label(parent, 180, "Free heap", heapStr, COLOR_TEXT_1);
-    row_label(parent, 210, "By", "markbeets@gmail.com", COLOR_TEXT_3);
+    lv_obj_t *network_panel = create_metric_panel(parent, 20, 98, 440, 92);
+    metric_label(network_panel, 16, 14, "NETWORK", WiFi.SSID().c_str(), COLOR_TEXT_1);
+    metric_label(network_panel, 230, 14, "SIGNAL", rssiStr, COLOR_CYAN);
+    metric_label(network_panel, 16, 54, "ADDRESS", WiFi.localIP().toString().c_str(), COLOR_TEXT_1);
+
+    lv_obj_t *memory_panel = create_metric_panel(parent, 20, 204, 440, 58);
+    metric_label(memory_panel, 16, 13, "FREE MEMORY", heapStr, COLOR_GREEN);
+
+    lv_obj_t *credit = create_label(parent, &font_inter_regular_12, COLOR_TEXT_3, "ADS-B FLIGHT MONITOR");
+    lv_obj_set_pos(credit, 20, 284);
 }
 
 void render_topstats(lv_obj_t *parent, const FlightStats &stats) {
-    create_label(parent, &lv_font_montserrat_20, COLOR_TEXT_1, "Aircraft Statistics");
+    render_screen_header(parent, "LIVE AIRSPACE", "Flight Statistics");
 
     const AircraftDetailsStruct &fastest  = stats.aircraft[stats.fastestAircraft];
     const AircraftDetailsStruct &slowest  = stats.aircraft[stats.slowestAircraft];
@@ -401,14 +478,26 @@ void render_topstats(lv_obj_t *parent, const FlightStats &stats) {
     const AircraftDetailsStruct &closest  = stats.aircraft[stats.closestAircraft];
     const AircraftDetailsStruct &farthest = stats.aircraft[stats.farthestAircraft];
 
-    row_label(parent, 60,  "Fastest",  (fastest.identifier + " " + String((int)fastest.speed) + "kt").c_str(), COLOR_TEXT_1);
-    row_label(parent, 90,  "Slowest",  (slowest.identifier + " " + String((int)slowest.speed) + "kt").c_str(), COLOR_TEXT_1);
-    row_label(parent, 120, "Highest",  (highest.identifier + " " + String((int)highest.altitude) + "ft").c_str(), COLOR_TEXT_1);
-    row_label(parent, 150, "Lowest",   (lowest.identifier + " " + String((int)lowest.altitude) + "ft").c_str(), COLOR_TEXT_1);
-    row_label(parent, 180, "Closest",  (closest.identifier + " " + String((int)closest.distance) + "nmi").c_str(), COLOR_TEXT_1);
-    row_label(parent, 210, "Farthest", (farthest.identifier + " " + String((int)farthest.distance) + "nmi").c_str(), COLOR_TEXT_1);
-    row_label(parent, 240, "Emergencies",
-              stats.emergencyCount > 0 ? String(stats.emergencyCount).c_str() : "None",
+    auto stats_row = [parent](int y, const char *label, const String &identifier,
+                              const String &value, lv_color_t value_color) {
+        lv_obj_t *panel = create_metric_panel(parent, 20, y, 440, 34);
+        lv_obj_t *label_obj = create_label(panel, &font_inter_regular_12, COLOR_TEXT_2, label);
+        lv_obj_set_pos(label_obj, 12, 9);
+        lv_obj_t *identifier_obj = create_label(parent, &font_inter_semibold_14, COLOR_TEXT_1, identifier.c_str());
+        lv_obj_set_pos(identifier_obj, 160, y + 8);
+        lv_obj_t *value_obj = create_label(parent, &font_jetbrainsmono_medium_12, value_color, value.c_str());
+        lv_obj_set_width(value_obj, 110);
+        lv_obj_set_style_text_align(value_obj, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_pos(value_obj, 338, y + 10);
+    };
+
+    stats_row(96,  "FASTEST",  fastest.identifier,  String((int)fastest.speed) + " KT", COLOR_CYAN);
+    stats_row(136, "SLOWEST",  slowest.identifier,  String((int)slowest.speed) + " KT", COLOR_CYAN);
+    stats_row(176, "HIGHEST",  highest.identifier,  String((int)highest.altitude) + " FT", COLOR_CYAN);
+    stats_row(216, "LOWEST",   lowest.identifier,   String((int)lowest.altitude) + " FT", COLOR_CYAN);
+    stats_row(256, "CLOSEST",  closest.identifier,  String((int)closest.distance) + " NMI", COLOR_CYAN);
+    stats_row(296, "FARTHEST", farthest.identifier, String((int)farthest.distance) + " NMI", COLOR_CYAN);
+    stats_row(336, "EMERGENCY", "", stats.emergencyCount > 0 ? String(stats.emergencyCount) : "NONE",
               stats.emergencyCount > 0 ? COLOR_RED : COLOR_GREEN);
 }
 
@@ -418,33 +507,50 @@ void render_aircraft_card(lv_obj_t *parent, const FlightStats &stats, const Airc
         lv_obj_set_style_border_width(parent, 4, 0);
     }
 
-    create_label(parent, &lv_font_montserrat_14, COLOR_TEXT_2, "closest flight");
+    render_screen_header(parent, is_emergency ? "PRIORITY AIRCRAFT" : "CLOSEST FLIGHT", "Tracking");
 
     if (stats.totalAircraft > 0) {
         lv_obj_t *badge = lv_obj_create(parent);
-        lv_obj_set_size(badge, 70, 40);
-        lv_obj_set_pos(badge, DISPLAY_WIDTH - 90, 20);
+        lv_obj_set_size(badge, 112, 50);
+        lv_obj_set_pos(badge, DISPLAY_WIDTH - 132, 20);
         lv_obj_set_style_bg_color(badge, COLOR_MAGENTA, 0);
         lv_obj_set_style_radius(badge, 6, 0);
-        lv_obj_t *count = create_label(badge, &lv_font_montserrat_20, lv_color_black(), String(stats.totalAircraft).c_str());
-        lv_obj_center(count);
+        lv_obj_set_style_pad_all(badge, 0, 0);
+        lv_obj_t *tracking = create_label(badge, &font_inter_regular_12, lv_color_black(), "TRACKING");
+        lv_obj_set_pos(tracking, 12, 7);
+        lv_obj_t *count = create_label(badge, &font_inter_bold_18, lv_color_black(), String(stats.totalAircraft).c_str());
+        lv_obj_set_pos(count, 12, 23);
     }
 
+    lv_obj_t *identity_panel = create_metric_panel(parent, 20, 98, 440, 82);
     if (aircraft.identifier.length() > 0) {
-        lv_obj_t *l = create_label(parent, &lv_font_montserrat_20, COLOR_TEXT_1, aircraft.identifier.c_str());
-        lv_obj_set_pos(l, 20, 60);
+        lv_obj_t *l = create_label(identity_panel, &font_inter_bold_18, COLOR_TEXT_1, aircraft.identifier.c_str());
+        lv_obj_set_pos(l, 16, 13);
     }
 
     if (aircraft.description.length() > 0) {
-        lv_obj_t *l = create_label(parent, &lv_font_montserrat_18, COLOR_TEXT_1, aircraft.description.c_str());
-        lv_obj_set_pos(l, 20, 110);
+        lv_obj_t *l = create_label(identity_panel, &font_inter_regular_14, COLOR_TEXT_2, aircraft.description.c_str());
+        lv_obj_set_pos(l, 16, 46);
     }
 
-    row_label(parent, 160, "distance away", (String((int)aircraft.distance) + "nmi").c_str(), COLOR_TEXT_1);
-    row_label(parent, 190, "status", aircraft.status.c_str(), status_color(aircraft.status));
-    row_label(parent, 220, "squawk", String(aircraft.squawk).c_str(),
-              isSquawkEmergency(aircraft.squawk) ? COLOR_RED : COLOR_TEXT_1);
-    row_label(parent, 250, "altitude", (String((int)aircraft.altitude) + "ft").c_str(), COLOR_TEXT_1);
+    lv_obj_t *metrics_panel = create_metric_panel(parent, 20, 194, 440, 108);
+    metric_label(metrics_panel, 16, 14, "DISTANCE", (String((int)aircraft.distance) + " NMI").c_str(), COLOR_CYAN);
+    metric_label(metrics_panel, 230, 14, "ALTITUDE", (String((int)aircraft.altitude) + " FT").c_str(), altitude_color(aircraft.altitude));
+    metric_label(metrics_panel, 16, 62, "SQUAWK", String(aircraft.squawk).c_str(),
+                 isSquawkEmergency(aircraft.squawk) ? COLOR_RED : COLOR_TEXT_1);
+
+    lv_obj_t *status_chip = lv_obj_create(metrics_panel);
+    lv_obj_set_size(status_chip, 174, 34);
+    lv_obj_set_pos(status_chip, 230, 59);
+    lv_obj_set_style_bg_color(status_chip, status_color(aircraft.status), 0);
+    lv_obj_set_style_radius(status_chip, 3, 0);
+    lv_obj_set_style_pad_all(status_chip, 0, 0);
+    lv_obj_t *status = create_label(status_chip, &font_inter_bold_16, lv_color_black(), status_indicator(aircraft.status));
+    lv_obj_set_pos(status, 12, 8);
+    lv_obj_t *status_text = create_label(status_chip, &font_inter_regular_12, lv_color_black(), aircraft.status.c_str());
+    lv_obj_set_width(status_text, 102);
+    lv_obj_set_style_text_align(status_text, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_pos(status_text, 60, 10);
 }
 
 void render_empty(lv_obj_t *parent) {
@@ -458,15 +564,82 @@ void render_empty(lv_obj_t *parent) {
     else if (offset <= 0) { offset = 0; dir = 1; }
 
     lv_obj_t *box = lv_obj_create(parent);
-    lv_obj_set_size(box, DISPLAY_WIDTH, 70);
-    lv_obj_set_pos(box, 0, offset);
-    lv_obj_set_style_bg_color(box, lv_color_hex(0xffffff), 0);
-    lv_obj_set_style_radius(box, 5, 0);
+    lv_obj_set_size(box, DISPLAY_WIDTH - 48, 116);
+    lv_obj_set_pos(box, 24, offset);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x111520), 0);
+    lv_obj_set_style_radius(box, 4, 0);
+    lv_obj_set_style_border_color(box, COLOR_CYAN, 0);
+    lv_obj_set_style_border_width(box, 1, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
 
-    lv_obj_t *l1 = create_label(box, &lv_font_montserrat_20, lv_color_black(), "No aircraft are");
-    lv_obj_align(l1, LV_ALIGN_TOP_MID, 0, 4);
-    lv_obj_t *l2 = create_label(box, &lv_font_montserrat_20, lv_color_black(), "currently being tracked");
-    lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, 34);
+    lv_obj_t *title = create_label(parent, &font_inter_bold_18, COLOR_TEXT_1, "NO AIRCRAFT");
+    lv_obj_set_pos(title, 48, offset + 26);
+    lv_obj_t *message = create_label(parent, &font_inter_regular_14, COLOR_TEXT_2,
+                                     "Waiting for the next ADS-B update");
+    lv_obj_set_pos(message, 48, offset + 60);
+}
+
+enum class AircraftIconKind : uint8_t {
+    Plane,
+    Helicopter,
+};
+
+AircraftIconKind aircraft_icon_kind(const AircraftDetailsStruct &aircraft) {
+    if (aircraft.category == "A7") return AircraftIconKind::Helicopter;
+
+    String description = aircraft.description;
+    description.toLowerCase();
+    return description.indexOf("helicopter") >= 0 || description.indexOf("rotorcraft") >= 0
+        ? AircraftIconKind::Helicopter
+        : AircraftIconKind::Plane;
+}
+
+float aircraft_icon_bearing(const AircraftDetailsStruct &aircraft) {
+    if (aircraft.hasTrack && isfinite(aircraft.track)) return aircraft.track;
+    if (aircraft.hasHeading && isfinite(aircraft.heading)) return aircraft.heading;
+    return 0.0f;
+}
+
+lv_point_t rotate_icon_point(int x, int y, int8_t offset_x, int8_t offset_y, float bearing) {
+    const float angle = radians(bearing);
+    const float cos_angle = cosf(angle);
+    const float sin_angle = sinf(angle);
+    return {
+        (lv_coord_t)(x + offset_x * cos_angle - offset_y * sin_angle),
+        (lv_coord_t)(y + offset_x * sin_angle + offset_y * cos_angle),
+    };
+}
+
+void draw_aircraft_icon(lv_obj_t *canvas, int x, int y, const AircraftDetailsStruct &aircraft,
+                        lv_color_t color) {
+    const AircraftIconKind kind = aircraft_icon_kind(aircraft);
+    const float bearing = aircraft_icon_bearing(aircraft);
+
+    lv_draw_line_dsc_t line_dsc;
+    lv_draw_line_dsc_init(&line_dsc);
+    line_dsc.color = color;
+    line_dsc.width = 2;
+
+    auto draw_segment = [&](int8_t x1, int8_t y1, int8_t x2, int8_t y2) {
+        lv_point_t points[2] = {
+            rotate_icon_point(x, y, x1, y1, bearing),
+            rotate_icon_point(x, y, x2, y2, bearing),
+        };
+        lv_canvas_draw_line(canvas, points, 2, &line_dsc);
+    };
+
+    if (kind == AircraftIconKind::Helicopter) {
+        draw_segment(0, -7, 0, 7);   // fuselage
+        draw_segment(-9, -3, 9, -3); // main rotor
+        draw_segment(0, 6, 0, 10);   // tail boom
+        line_dsc.width = 1;
+        draw_segment(-3, 9, 3, 9);   // tail rotor/stabilizer
+    } else {
+        draw_segment(0, -10, 0, 8);  // fuselage
+        draw_segment(-9, 0, 9, 0);   // wings
+        line_dsc.width = 1;
+        draw_segment(-3, 6, 3, 6);   // tailplane
+    }
 }
 
 void render_map(lv_obj_t *parent, const FlightStats &stats) {
@@ -510,30 +683,21 @@ void render_map(lv_obj_t *parent, const FlightStats &stats) {
     lv_point_t center_v[2] = {{(lv_coord_t)centerX, (lv_coord_t)(centerY - 12)}, {(lv_coord_t)centerX, (lv_coord_t)(centerY + 12)}};
     lv_canvas_draw_line(canvas, center_v, 2, &line_dsc);
 
-    lv_draw_rect_dsc_t dot_dsc;
-    lv_draw_rect_dsc_init(&dot_dsc);
-    dot_dsc.radius = LV_RADIUS_CIRCLE;
-
     for (int i = 0; i < stats.totalAircraft; i++) {
         const AircraftDetailsStruct &ac = stats.aircraft[i];
+        if (!isfinite(ac.latitude) || !isfinite(ac.longitude)) continue;
+
         float latDiffMiles = (ac.latitude - myLat) * 69.0f;
         float lonDiffMiles = (ac.longitude - myLon) * 69.0f * cos(radians(myLat));
 
         int x = centerX + (int)(lonDiffMiles * scale);
         int y = centerY - (int)(latDiffMiles * scale);
-        if (x < 0 || x >= DISPLAY_WIDTH || y < 0 || y >= DISPLAY_HEIGHT) continue;
+        constexpr int ICON_RADIUS = 10;
+        if (x < ICON_RADIUS || x >= DISPLAY_WIDTH - ICON_RADIUS ||
+            y < ICON_RADIUS || y >= DISPLAY_HEIGHT - ICON_RADIUS) continue;
 
         lv_color_t color = altitude_color(ac.altitude);
-        dot_dsc.bg_color = color;
-        lv_area_t dot_area = {(lv_coord_t)(x - 8), (lv_coord_t)(y - 8), (lv_coord_t)(x + 8), (lv_coord_t)(y + 8)};
-        lv_canvas_draw_rect(canvas, dot_area.x1, dot_area.y1, 16, 16, &dot_dsc);
-
-        float headingRadians = radians(ac.heading);
-        int lineX = x + (int)(25 * sin(headingRadians));
-        int lineY = y - (int)(25 * cos(headingRadians));
-        line_dsc.color = color;
-        lv_point_t heading_line[2] = {{(lv_coord_t)x, (lv_coord_t)y}, {(lv_coord_t)lineX, (lv_coord_t)lineY}};
-        lv_canvas_draw_line(canvas, heading_line, 2, &line_dsc);
+        draw_aircraft_icon(canvas, x, y, ac, color);
     }
 }
 
@@ -591,31 +755,32 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
     const int cy = radar_center_y();
     const int outerR = radar_outer_radius();
 
-    lv_draw_rect_dsc_t dot_dsc;
-    lv_draw_rect_dsc_init(&dot_dsc);
-    dot_dsc.radius = LV_RADIUS_CIRCLE;
-
     lv_draw_label_dsc_t label_dsc;
     lv_draw_label_dsc_init(&label_dsc);
-    label_dsc.font = &lv_font_montserrat_14;
+    label_dsc.font = &font_inter_regular_14;
 
     const float rangeNmi = radar_range_nmi();
 
     for (int i = 0; i < stats.totalAircraft; i++) {
         const AircraftDetailsStruct &ac = stats.aircraft[i];
-        if (ac.distance <= 0 || ac.distance > rangeNmi) continue; // rim-clamp skipped: keep radar uncluttered
+        if (!isfinite(ac.distance) || !isfinite(ac.latitude) || !isfinite(ac.longitude) ||
+            ac.distance <= 0 || ac.distance > rangeNmi) continue;
 
         float latDiffMiles = (ac.latitude - myLat) * 69.0f;
         float lonDiffMiles = (ac.longitude - myLon) * 69.0f * cos(radians(myLat));
         float bearing = atan2(lonDiffMiles, latDiffMiles); // radians, 0 = north
+        if (!isfinite(bearing)) continue;
 
         float r = (ac.distance / rangeNmi) * outerR;
         int x = cx + (int)(r * sin(bearing));
         int y = cy - (int)(r * cos(bearing));
 
+        constexpr int ICON_RADIUS = 10;
+        if (x < ICON_RADIUS || x >= DISPLAY_WIDTH - ICON_RADIUS ||
+            y < ICON_RADIUS || y >= DISPLAY_HEIGHT - ICON_RADIUS) continue;
+
         lv_color_t color = altitude_color(ac.altitude);
-        dot_dsc.bg_color = color;
-        lv_canvas_draw_rect(canvas, x - 5, y - 5, 10, 10, &dot_dsc);
+        draw_aircraft_icon(canvas, x, y, ac, color);
 
         label_dsc.color = color;
         char idBuf[12];
@@ -628,7 +793,7 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
 void radar_sweep_timer_cb(lv_timer_t *timer) {
     if (!s_radar_sweep_canvas || !s_radar_sweep_buf) return;
 
-    lv_canvas_fill_bg(s_radar_sweep_canvas, COLOR_BG, LV_OPA_TRANSP); // resets alpha channel to fully transparent
+    lv_canvas_fill_bg(s_radar_sweep_canvas, COLOR_BG, LV_OPA_TRANSP);
 
     const int cx = radar_center_x();
     const int cy = radar_center_y();
@@ -649,7 +814,6 @@ void radar_sweep_timer_cb(lv_timer_t *timer) {
     lv_point_t sweep_line[2] = {{(lv_coord_t)cx, (lv_coord_t)cy}, {(lv_coord_t)x, (lv_coord_t)y}};
     lv_canvas_draw_line(s_radar_sweep_canvas, sweep_line, 2, &sweep_dsc);
 
-    // Fading trail wedge behind the sweep line.
     lv_draw_line_dsc_t trail_dsc;
     lv_draw_line_dsc_init(&trail_dsc);
     trail_dsc.color = COLOR_GREEN;
@@ -689,11 +853,11 @@ void render_radar(lv_obj_t *parent, const FlightStats &stats) {
     radar_draw_static(s_radar_canvas);
     radar_draw_aircraft(s_radar_canvas, stats);
 
-    if (!s_radar_sweep_buf) {
+    if (radarmap::s_scan_line_enabled && !s_radar_sweep_buf) {
         s_radar_sweep_buf = (lv_color_t *)heap_caps_malloc(
             LV_CANVAS_BUF_SIZE_TRUE_COLOR_ALPHA(DISPLAY_WIDTH, DISPLAY_HEIGHT), MALLOC_CAP_SPIRAM);
     }
-    if (s_radar_sweep_buf) {
+    if (radarmap::s_scan_line_enabled && s_radar_sweep_buf) {
         s_radar_sweep_canvas = lv_canvas_create(s_radar_canvas_holder);
         lv_canvas_set_buffer(s_radar_sweep_canvas, s_radar_sweep_buf, DISPLAY_WIDTH, DISPLAY_HEIGHT, LV_IMG_CF_TRUE_COLOR_ALPHA);
         lv_canvas_fill_bg(s_radar_sweep_canvas, COLOR_BG, LV_OPA_TRANSP);
@@ -703,33 +867,32 @@ void render_radar(lv_obj_t *parent, const FlightStats &stats) {
     const int cy = radar_center_y();
     const int outerR = radar_outer_radius();
 
-    lv_obj_t *lblN = create_label(s_radar_canvas_holder, &lv_font_montserrat_16, COLOR_GREEN, "N");
+    lv_obj_t *lblN = create_label(s_radar_canvas_holder, &font_inter_bold_16, COLOR_GREEN, "N");
     lv_obj_align(lblN, LV_ALIGN_TOP_LEFT, cx - 5, cy - outerR - 22);
-    lv_obj_t *lblS = create_label(s_radar_canvas_holder, &lv_font_montserrat_16, COLOR_GREEN, "S");
+    lv_obj_t *lblS = create_label(s_radar_canvas_holder, &font_inter_bold_16, COLOR_GREEN, "S");
     lv_obj_align(lblS, LV_ALIGN_TOP_LEFT, cx - 5, cy + outerR + 4);
-    lv_obj_t *lblE = create_label(s_radar_canvas_holder, &lv_font_montserrat_16, COLOR_GREEN, "E");
+    lv_obj_t *lblE = create_label(s_radar_canvas_holder, &font_inter_bold_16, COLOR_GREEN, "E");
     lv_obj_align(lblE, LV_ALIGN_TOP_LEFT, cx + outerR + 8, cy - 8);
-    lv_obj_t *lblW = create_label(s_radar_canvas_holder, &lv_font_montserrat_16, COLOR_GREEN, "W");
+    lv_obj_t *lblW = create_label(s_radar_canvas_holder, &font_inter_bold_16, COLOR_GREEN, "W");
     lv_obj_align(lblW, LV_ALIGN_TOP_LEFT, cx - outerR - 20, cy - 8);
 
     char rangeBuf[16];
     snprintf(rangeBuf, sizeof(rangeBuf), "%dnmi", (int)radar_range_nmi());
-    lv_obj_t *lblRange = create_label(s_radar_canvas_holder, &lv_font_montserrat_14, COLOR_TEXT_3, rangeBuf);
+    lv_obj_t *lblRange = create_label(s_radar_canvas_holder, &font_inter_regular_14, COLOR_TEXT_3, rangeBuf);
     lv_obj_align(lblRange, LV_ALIGN_TOP_LEFT, cx + 6, cy - outerR + 2);
 
-    if (!s_radar_sweep_timer) {
+    if (radarmap::s_scan_line_enabled && !s_radar_sweep_timer) {
         s_radar_sweep_timer = lv_timer_create(radar_sweep_timer_cb, RADAR_SWEEP_TICK_MS, nullptr);
     }
-    lv_timer_resume(s_radar_sweep_timer);
+    if (radarmap::s_scan_line_enabled && s_radar_sweep_timer) {
+        lv_timer_resume(s_radar_sweep_timer);
+    }
 }
 
 void radar_stop() {
     if (s_radar_sweep_timer) {
         lv_timer_pause(s_radar_sweep_timer);
     }
-    // Objects live under s_content and are about to be (or already were)
-    // deleted by clear_content(); drop our references so the paused timer
-    // callback never touches freed canvases.
     s_radar_canvas_holder = nullptr;
     s_radar_canvas = nullptr;
     s_radar_sweep_canvas = nullptr;
@@ -805,7 +968,7 @@ void display_init() {
 
     create_touch_zones();
 
-    s_clock_label = create_label(s_root, &lv_font_montserrat_20, COLOR_CLOCK, "--:--:--");
+    s_clock_label = create_label(s_root, &font_inter_bold_18, COLOR_CLOCK, "--:--:--");
     lv_obj_add_flag(s_clock_label, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_clear_flag(s_clock_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_align(s_clock_label, LV_ALIGN_BOTTOM_MID, 0, -10);
@@ -819,7 +982,7 @@ void display_init() {
 }
 
 void display_set_brightness(uint8_t level) {
-    ledcWrite(GFX_BL, level);
+    ledcWrite(GFX_BL, level > 0 ? 255 : 0);
 }
 
 void display_render_frame(uint8_t frame, const FlightStats &stats) {
@@ -858,9 +1021,7 @@ void display_render_frame(uint8_t frame, const FlightStats &stats) {
     lv_obj_move_foreground(s_clock_label);
 }
 
-void display_update_clock() {
-    if (!s_clock_label) return;
-    char buf[10];
-    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", hour(), minute(), second());
-    lv_label_set_text(s_clock_label, buf);
+void display_update_clock(const char *time_text) {
+    if (!s_clock_label || !time_text) return;
+    lv_label_set_text(s_clock_label, time_text);
 }

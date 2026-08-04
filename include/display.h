@@ -38,7 +38,7 @@ enum DisplayFrame : uint8_t {
 constexpr bool FRAME_SYSINFO_ENABLED = true;
 constexpr bool FRAME_OVERVIEW_ENABLED = true;
 constexpr bool FRAME_TOPSTATS_ENABLED = true;
-constexpr bool FRAME_MAP_ENABLED = true;
+constexpr bool FRAME_MAP_ENABLED = false;
 constexpr bool FRAME_RADAR_ENABLED = true;
 
 // While FRAME_RADAR is active, poll ADS-B data faster so aircraft motion is
@@ -49,7 +49,7 @@ void display_init();
 bool display_ready();
 void display_set_brightness(uint8_t level);
 void display_render_frame(uint8_t frame, const FlightStats &stats);
-void display_update_clock();
+void display_update_clock(const char *time_text);
 void display_debug_line(const String &line);
 
 // Touch tap-zone callbacks, invoked from the LVGL event handlers registered
