@@ -874,7 +874,7 @@ void radar_info_timeout_cb(lv_timer_t *timer) {
     dismiss_radar_info();
 }
 
-void show_radar_info(const RadarHitTarget &target) {
+void show_radar_info(const RadarHitTarget &target, bool persistent = false) {
     dismiss_radar_info();
 
     s_radar_info_box = lv_obj_create(s_root);
@@ -910,8 +910,30 @@ void show_radar_info(const RadarHitTarget &target) {
     lv_obj_set_pos(details_label, 12, 58);
 
     lv_obj_move_foreground(s_radar_info_box);
-    s_radar_info_timer = lv_timer_create(radar_info_timeout_cb, 5000, nullptr);
-    lv_timer_set_repeat_count(s_radar_info_timer, 1);
+    if (!persistent) {
+        s_radar_info_timer = lv_timer_create(radar_info_timeout_cb, 5000, nullptr);
+        lv_timer_set_repeat_count(s_radar_info_timer, 1);
+    }
+}
+
+void radar_show_nearest_info(const FlightStats &stats) {
+    if (stats.totalAircraft <= 0 || stats.closestAircraft >= stats.totalAircraft) {
+        dismiss_radar_info();
+        return;
+    }
+
+    const AircraftDetailsStruct &ac = stats.aircraft[stats.closestAircraft];
+    RadarHitTarget target{};
+    snprintf(target.identifier, sizeof(target.identifier), "%s", ac.identifier.c_str());
+    snprintf(target.description, sizeof(target.description), "%s", ac.description.c_str());
+    snprintf(target.route, sizeof(target.route), "%s", ac.route.c_str());
+    snprintf(target.status, sizeof(target.status), "%s", ac.status.c_str());
+    target.altitude = ac.altitude;
+    target.squawk = ac.squawk;
+    target.distance = ac.distance;
+    target.speed = ac.speed;
+
+    show_radar_info(target, true);
 }
 
 void radar_canvas_click_cb(lv_event_t *event) {
@@ -990,6 +1012,15 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
         if (x < ICON_RADIUS || x >= DISPLAY_WIDTH - ICON_RADIUS ||
             y < ICON_RADIUS || y >= DISPLAY_HEIGHT - ICON_RADIUS) continue;
 
+        bool isClosest = radarmap::s_always_show_nearest_info && i == stats.closestAircraft;
+        if (isClosest) {
+            lv_draw_arc_dsc_t highlight_dsc;
+            lv_draw_arc_dsc_init(&highlight_dsc);
+            highlight_dsc.color = COLOR_CYAN;
+            highlight_dsc.width = 2;
+            lv_canvas_draw_arc(canvas, x - 1, y, 16, 0, 360, &highlight_dsc);
+        }
+
         lv_color_t color = altitude_color(ac.altitude);
         draw_aircraft_icon(canvas, x, y, ac, color, true);
 
@@ -1010,7 +1041,8 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
         label_dsc.color = color;
         char idBuf[12];
         snprintf(idBuf, sizeof(idBuf), "%s", ac.identifier.c_str());
-        lv_area_t label_area = {(lv_coord_t)(x + 8), (lv_coord_t)(y - 8), (lv_coord_t)(x + 100), (lv_coord_t)(y + 8)};
+        int labelX = isClosest ? x + 17 : x + 8;
+        lv_area_t label_area = {(lv_coord_t)labelX, (lv_coord_t)(y - 8), (lv_coord_t)(labelX + 92), (lv_coord_t)(y + 8)};
         lv_canvas_draw_text(canvas, label_area.x1, label_area.y1, 92, &label_dsc, idBuf);
     }
 }
@@ -1079,6 +1111,10 @@ void render_radar(lv_obj_t *parent, const FlightStats &stats) {
 
     radar_draw_static(s_radar_canvas);
     radar_draw_aircraft(s_radar_canvas, stats);
+
+    if (radarmap::s_always_show_nearest_info) {
+        radar_show_nearest_info(stats);
+    }
 
     if (radarmap::s_scan_line_enabled && !s_radar_sweep_buf) {
         s_radar_sweep_buf = (lv_color_t *)heap_caps_malloc(

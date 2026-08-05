@@ -95,6 +95,7 @@ inline bool s_enabled = true;
 inline Style s_style = Style::DARK_GRAY;
 inline float s_range_nmi = 40.0f; // ground distance (radius) shown at the radar's outer ring
 inline bool s_scan_line_enabled = false;
+inline bool s_always_show_nearest_info = false;
 
 inline lv_color_t *s_map_buf = nullptr; // RGB565, MAP_SIZE_PX x MAP_SIZE_PX, PSRAM
 inline uint8_t *s_jpeg_work_buf = nullptr;

@@ -215,6 +215,11 @@ bool parseConfigValue(String key, String value)
     radarmap::s_scan_line_enabled = (value == "true");
   }
 
+  if (key == "nearestinfo")
+  {
+    radarmap::s_always_show_nearest_info = (value == "true");
+  }
+
   if (key == "radardwellseconds")
   {
     unsigned long __seconds = value.toInt();
@@ -291,6 +296,7 @@ void saveConfigValuesSPIFFS()
   writeStrtoFile(__configFile, "mapstyle", String(radarmap::style_name(radarmap::s_style)));
   writeStrtoFile(__configFile, "maprange", String(radarmap::s_range_nmi, 1));
   writeStrtoFile(__configFile, "scanline", String(radarmap::s_scan_line_enabled ? "true" : "false"));
+  writeStrtoFile(__configFile, "nearestinfo", String(radarmap::s_always_show_nearest_info ? "true" : "false"));
   writeStrtoFile(__configFile, "radardwellseconds", String(_radarDwellMillis / 1000UL));
 
   __configFile.close();
@@ -366,10 +372,10 @@ void setupWebServer()
   _httpServer.on("/", []()
                  {
              String __infoStr = "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'>" + style;
-             __infoStr += "<script>function syncToggles(){['brightness','mapenabled','scanline'].forEach(function(id){document.getElementById(id+'Value').value=document.getElementById(id).checked?'true':'false';});document.getElementById('brightnessValue').value=document.getElementById('brightness').checked?'255':'0';}</script></head><body><main class='shell'><header class='masthead'><div class='brand'>FLIGHT RADAR<small>DEVICE CONFIGURATION</small></div><div class='badge'>ONLINE</div></header>";
+             __infoStr += "<script>function syncToggles(){['brightness','mapenabled','scanline','nearestinfo'].forEach(function(id){document.getElementById(id+'Value').value=document.getElementById(id).checked?'true':'false';});document.getElementById('brightnessValue').value=document.getElementById('brightness').checked?'255':'0';}</script></head><body><main class='shell'><header class='masthead'><div class='brand'>FLIGHT RADAR<small>DEVICE CONFIGURATION</small></div><div class='badge'>ONLINE</div></header>";
              __infoStr += "<form action='/set' id='myForm' onsubmit='syncToggles()'>";
              __infoStr += "<section class='panel'><h2>DATA SOURCE</h2><div class='field'><label for='jsonURI'>Aircraft JSON URL</label><input id='jsonURI' data-lpignore='true' name='jsonURI' type='text' value='" + _locationCode + "'></div></section>";
-             __infoStr += "<section class='panel'><h2>DISPLAY</h2><input type='hidden' id='brightnessValue' name='brightness'><label class='toggle'><span>Screen backlight</span><input id='brightness' type='checkbox'" + String(_brightnessHigh ? " checked" : "") + "><i class='switch'></i></label><input type='hidden' id='scanlineValue' name='scanline'><label class='toggle'><span>Radar scanning line</span><input id='scanline' type='checkbox'" + String(radarmap::s_scan_line_enabled ? " checked" : "") + "><i class='switch'></i></label><div class='field'><label for='radardwellseconds'>Radar dwell (seconds)</label><input id='radardwellseconds' name='radardwellseconds' type='number' min='60' step='1' value='" + String(_radarDwellMillis / 1000UL) + "'></div></section>";
+             __infoStr += "<section class='panel'><h2>DISPLAY</h2><input type='hidden' id='brightnessValue' name='brightness'><label class='toggle'><span>Screen backlight</span><input id='brightness' type='checkbox'" + String(_brightnessHigh ? " checked" : "") + "><i class='switch'></i></label><input type='hidden' id='scanlineValue' name='scanline'><label class='toggle'><span>Radar scanning line</span><input id='scanline' type='checkbox'" + String(radarmap::s_scan_line_enabled ? " checked" : "") + "><i class='switch'></i></label><input type='hidden' id='nearestinfoValue' name='nearestinfo'><label class='toggle'><span>Always show nearest aircraft info</span><input id='nearestinfo' type='checkbox'" + String(radarmap::s_always_show_nearest_info ? " checked" : "") + "><i class='switch'></i></label><div class='field'><label for='radardwellseconds'>Radar dwell (seconds)</label><input id='radardwellseconds' name='radardwellseconds' type='number' min='60' step='1' value='" + String(_radarDwellMillis / 1000UL) + "'></div></section>";
              __infoStr += "<section class='panel'><h2>RADAR MAP</h2><input type='hidden' id='mapenabledValue' name='mapenabled'><label class='toggle'><span>Background map</span><input id='mapenabled' type='checkbox'" + String(radarmap::s_enabled ? " checked" : "") + "><i class='switch'></i></label><div class='field'><label for='mapstyle'>Map style</label><select id='mapstyle' name='mapstyle'>";
             {
               const radarmap::Style __styles[] = {radarmap::Style::DARK_GRAY, radarmap::Style::LIGHT_GRAY, radarmap::Style::STREETS, radarmap::Style::IMAGERY, radarmap::Style::STREETS_HIGHLIGHT};
