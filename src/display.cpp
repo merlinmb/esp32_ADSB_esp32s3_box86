@@ -748,11 +748,14 @@ void draw_aircraft_icon(lv_obj_t *canvas, int x, int y, const AircraftDetailsStr
         line_dsc.width = 1;
         draw_segment(-3, 9, 3, 9);   // short tail
     } else {
-        draw_segment(0, -10, 0, 8);   // fuselage
-        draw_segment(0, -2, -9, 8);   // left wing, swept back from fuselage
-        draw_segment(0, -2, 9, 8);    // right wing, swept back from fuselage
+        draw_segment(0, -10, 0, 7);    // fuselage
+        draw_segment(0, -6, -7, 2); // left wing
+        draw_segment(0, -5, -7, 2);    // left wing bac
+        draw_segment(0, -6, 7, 2);  // right wing
+        draw_segment(0, -5, 7, 2);     // right wing back
+
         line_dsc.width = 1;
-        draw_segment(-3, 7, 3, 7);    // tailplane
+        draw_segment(-3, 6, 3, 6);     // tailplane
     }
 }
 

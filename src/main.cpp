@@ -690,7 +690,7 @@ void setup()
   DisplayOut("Configuring MQTT");
   setupMQTT();
   mqttReconnect(_mqttClientId);
-  mqttSendInitStat();
+
 
   DisplayOut("Opening Filesystem");
   setupSPIFFS();
@@ -733,6 +733,9 @@ void setup()
     &_fetchTaskHandle,// handle — used by loop to notify
     1                 // core 1 — same core as loop(), required for WiFiClient
   );
+
+  DisplayOut("Sending initial MQTT status");
+  mqttSendInitStat();
 
   DisplayOut("Free Heap Memory: " + String(ESP.getFreeHeap()));
   DisplayOut("Initialisation complete");
