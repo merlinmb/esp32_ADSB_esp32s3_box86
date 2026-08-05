@@ -29,7 +29,7 @@
 
 #define location "51.39502, -1.3387" // 97 Enborne Road
 
-#define MCMDVERSION 1.4
+#define MCMDVERSION 1.5
 
 bool _brightnessHigh = true;
 byte _brightness = MAXBRIGHTNESS;
@@ -817,7 +817,12 @@ void loop()
 
       _forceUpdate = false;
       _forceRender = false;
-      _runFrame = millis();
+      // Fresh radar data redraws the existing canvas but must not shorten its
+      // dwell period. User-forced renders keep their existing advance behavior.
+      if (frameElapsed || !dataUpdated)
+      {
+        _runFrame = millis();
+      }
     }
 
     if (_runCurrent - _runTime >= UPDATE_TIME_INTERVAL_MILLISECS)
