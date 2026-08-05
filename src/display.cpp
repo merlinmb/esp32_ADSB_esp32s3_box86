@@ -846,6 +846,8 @@ struct RadarHitTarget {
     int squawk;
     float distance;
     float speed;
+    float bearing;
+    float elevation;
 };
 
 RadarHitTarget s_radar_hit_targets[100];
@@ -904,6 +906,11 @@ void show_radar_info(const RadarHitTarget &target, bool persistent = false) {
     String details = (routeStr.length() > 0 && routeStr != "Unknown")
         ? String(target.status) + "  " + routeStr
         : String(target.status);
+    char look[48];
+    snprintf(look, sizeof(look), "Look:   %s  %03d DEG   INCL %+.0f DEG",
+             compass_direction(target.bearing), (int)roundf(target.bearing), target.elevation);
+    details += "              ";
+    details += look;
     lv_obj_t *details_label = create_label(s_radar_info_box, &font_inter_regular_12, COLOR_TEXT_2, details.c_str());
     lv_obj_set_width(details_label, DISPLAY_WIDTH - 64);
     lv_label_set_long_mode(details_label, LV_LABEL_LONG_CLIP);
@@ -932,6 +939,8 @@ void radar_show_nearest_info(const FlightStats &stats) {
     target.squawk = ac.squawk;
     target.distance = ac.distance;
     target.speed = ac.speed;
+    target.bearing = aircraft_bearing_degrees(ac);
+    target.elevation = degrees(atan2f((float)ac.altitude, ac.distance * 6076.12f));
 
     show_radar_info(target, true);
 }
@@ -1036,6 +1045,8 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
             target.squawk = ac.squawk;
             target.distance = ac.distance;
             target.speed = ac.speed;
+            target.bearing = aircraft_bearing_degrees(ac);
+            target.elevation = degrees(atan2f((float)ac.altitude, ac.distance * 6076.12f));
         }
 
         label_dsc.color = color;
