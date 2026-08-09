@@ -56,6 +56,9 @@ struct AircraftDetailsStruct {
     bool hasHeading;
     bool hasTrack;
     bool identifierUnknown; // Flag to indicate if identifier is unknown
+    bool isMilitary;
+    bool isPIA;  // Privacy ICAO Address
+    bool isLADD; // Limiting Aircraft Data Displayed
 };
 
 struct FlightStats {
@@ -178,6 +181,8 @@ inline bool fetchFlightData(const char* host, const char* path, const int port, 
     filterAircraft["lon"]          = true;
     filterAircraft["true_heading"] = true;
     filterAircraft["track"]        = true;
+    filterAircraft["hex"]          = true;
+    filterAircraft["dbFlags"]      = true;
 
     // Stream-parse directly from the TCP socket — no intermediate String buffer.
     DEBUG_PRINTLN("Streaming and parsing JSON");
@@ -223,6 +228,35 @@ inline bool isSquawkEmergency(int squawkCode) {
     Squawk 0030:: This code indicates that the aircraft is lost (UK specific). 
     */
     return (squawkCode == 30 || squawkCode == 7600 || squawkCode == 7500 || squawkCode == 7700 || squawkCode == 2000);
+}
+
+// readsb/tar1090 dbFlags bitfield: bit0=military, bit1=interesting, bit2=PIA, bit3=LADD
+constexpr uint8_t DBFLAG_MILITARY = 0x01;
+constexpr uint8_t DBFLAG_PIA      = 0x04;
+constexpr uint8_t DBFLAG_LADD     = 0x08;
+
+// Known military ICAO hex (24-bit address) allocation blocks, used as a
+// fallback when the server doesn't provide dbFlags (e.g. no tar1090 DB).
+inline bool isMilitaryHex(uint32_t hexVal) {
+    if (hexVal >= 0xADF800 && hexVal <= 0xAFFFFF) return true; // US military
+    if (hexVal >= 0x43C000 && hexVal <= 0x43CFFF) return true; // UK RAF
+    if (hexVal >= 0x3F0000 && hexVal <= 0x3FFFFF) return true; // German Luftwaffe
+    if (hexVal >= 0x3B0000 && hexVal <= 0x3BFFFF) return true; // French military
+    if (hexVal >= 0xC80000 && hexVal <= 0xC8FFFF) return true; // Canadian Armed Forces
+    if (hexVal >= 0x7CF000 && hexVal <= 0x7CFCFF) return true; // Australian Defence Force
+    return false;
+}
+
+// Standardized military/government callsign prefixes, used as a fallback
+// alongside isMilitaryHex() when dbFlags is unavailable.
+inline bool isMilitaryCallsign(const String &callsign) {
+    static const char *prefixes[] = {
+        "RCH", "REACH", "CNV", "RRR", "ASCOT", "GAF", "CTM", "CFC"
+    };
+    for (const char *prefix : prefixes) {
+        if (callsign.startsWith(prefix)) return true;
+    }
+    return false;
 }
 
 inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
@@ -286,8 +320,18 @@ inline void processFlightData(SpiRamJsonDocument &doc, FlightStats &target)
             plane["track"].as<float>(),
             plane["true_heading"].is<float>(),
             plane["track"].is<float>(),
+            false,
+            false,
+            false,
             false
         };
+
+        uint8_t dbFlags = plane["dbFlags"] | 0;
+        uint32_t hexVal = strtoul(plane["hex"] | "0", nullptr, 16);
+        __currentAircraft.isMilitary = (dbFlags & DBFLAG_MILITARY) || isMilitaryHex(hexVal) ||
+            isMilitaryCallsign(__currentAircraft.callsign);
+        __currentAircraft.isPIA = dbFlags & DBFLAG_PIA;
+        __currentAircraft.isLADD = dbFlags & DBFLAG_LADD;
 
         __currentAircraft.callsign.trim();
         __currentAircraft.flight.trim();

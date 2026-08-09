@@ -275,6 +275,9 @@ const lv_color_t COLOR_YELLOW   = lv_color_hex(0xffd23f);
 const lv_color_t COLOR_CYAN     = lv_color_hex(0x00e5ff);
 const lv_color_t COLOR_MAGENTA  = lv_color_hex(0xd23fff);
 const lv_color_t COLOR_CLOCK    = lv_color_hex(0xffffff);
+const lv_color_t COLOR_BADGE_MILITARY = lv_color_hex(0xb5423a);
+const lv_color_t COLOR_BADGE_PIA      = lv_color_hex(0x2f8f5b);
+const lv_color_t COLOR_BADGE_LADD     = lv_color_hex(0x2f7f8f);
 
 lv_obj_t *s_root         = nullptr;
 lv_obj_t *s_content       = nullptr;
@@ -301,6 +304,44 @@ lv_obj_t *create_label(lv_obj_t *parent, const lv_font_t *font,
     lv_obj_set_style_text_color(lbl, color, 0);
     lv_label_set_text(lbl, text);
     return lbl;
+}
+
+// Draws a small pill-shaped tag (e.g. "MILITARY") at (x, y); returns its width
+// so callers can lay out subsequent tags to the right.
+int draw_classification_tag(lv_obj_t *parent, int x, int y, const char *text, lv_color_t color) {
+    constexpr int tag_h = 20;
+    constexpr int pad_x = 8;
+    lv_obj_t *tag = lv_obj_create(parent);
+    lv_obj_set_style_bg_color(tag, color, 0);
+    lv_obj_set_style_radius(tag, 4, 0);
+    lv_obj_set_style_pad_all(tag, 0, 0);
+    lv_obj_set_style_border_width(tag, 0, 0);
+    lv_obj_clear_flag(tag, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *label = create_label(tag, &font_inter_regular_12, lv_color_white(), text);
+    lv_obj_set_pos(label, pad_x, 3);
+    lv_obj_update_layout(label);
+    int text_w = lv_obj_get_width(label);
+    int tag_w = text_w + pad_x * 2;
+    lv_obj_set_size(tag, tag_w, tag_h);
+    lv_obj_set_pos(tag, x, y);
+    return tag_w;
+}
+
+// Draws the Military/PIA/LADD tag row for a classified aircraft, left-to-right
+// starting at (x, y). No-op if the aircraft matches none of the flags.
+void draw_classification_tags(lv_obj_t *parent, int x, int y,
+                               bool isMilitary, bool isPIA, bool isLADD) {
+    constexpr int tag_gap = 6;
+    int cursor_x = x;
+    if (isMilitary) {
+        cursor_x += draw_classification_tag(parent, cursor_x, y, "MILITARY", COLOR_BADGE_MILITARY) + tag_gap;
+    }
+    if (isPIA) {
+        cursor_x += draw_classification_tag(parent, cursor_x, y, "PIA", COLOR_BADGE_PIA) + tag_gap;
+    }
+    if (isLADD) {
+        cursor_x += draw_classification_tag(parent, cursor_x, y, "LADD", COLOR_BADGE_LADD) + tag_gap;
+    }
 }
 
 void left_zone_click_cb(lv_event_t *e) {
@@ -632,15 +673,21 @@ void render_aircraft_card(lv_obj_t *parent, const FlightStats &stats, const Airc
     }
 
     lv_obj_t *identity_panel = create_metric_panel(parent, 20, 98, 440, 82);
+    int identifier_w = 0;
     if (aircraft.identifier.length() > 0) {
         lv_obj_t *l = create_label(identity_panel, &font_inter_bold_18, COLOR_TEXT_1, aircraft.identifier.c_str());
         lv_obj_set_pos(l, 16, 13);
+        lv_obj_update_layout(l);
+        identifier_w = lv_obj_get_width(l);
     }
 
     if (aircraft.description.length() > 0) {
         lv_obj_t *l = create_label(identity_panel, &font_inter_regular_14, COLOR_TEXT_2, aircraft.description.c_str());
         lv_obj_set_pos(l, 16, 46);
     }
+
+    draw_classification_tags(identity_panel, 16 + identifier_w + 14, 14,
+                              aircraft.isMilitary, aircraft.isPIA, aircraft.isLADD);
 
     lv_obj_t *metrics_panel = create_metric_panel(parent, 20, 194, 440, 108);
     metric_label(metrics_panel, 16, 14, "DISTANCE", (String((int)aircraft.distance) + " NMI").c_str(), COLOR_CYAN);
@@ -813,6 +860,15 @@ void render_map(lv_obj_t *parent, const FlightStats &stats) {
         if (x < ICON_RADIUS || x >= DISPLAY_WIDTH - ICON_RADIUS ||
             y < ICON_RADIUS || y >= DISPLAY_HEIGHT - ICON_RADIUS) continue;
 
+        if (ac.isMilitary || ac.isPIA || ac.isLADD) {
+            lv_color_t tag_color = ac.isMilitary ? COLOR_BADGE_MILITARY : (ac.isPIA ? COLOR_BADGE_PIA : COLOR_BADGE_LADD);
+            lv_draw_arc_dsc_t tag_dsc;
+            lv_draw_arc_dsc_init(&tag_dsc);
+            tag_dsc.color = tag_color;
+            tag_dsc.width = 2;
+            lv_canvas_draw_arc(canvas, x - 1, y, 13, 0, 360, &tag_dsc);
+        }
+
         lv_color_t color = altitude_color(ac.altitude);
         draw_aircraft_icon(canvas, x, y, ac, color);
     }
@@ -848,6 +904,9 @@ struct RadarHitTarget {
     float speed;
     float bearing;
     float elevation;
+    bool isMilitary;
+    bool isPIA;
+    bool isLADD;
 };
 
 RadarHitTarget s_radar_hit_targets[100];
@@ -896,6 +955,12 @@ void show_radar_info(const RadarHitTarget &target, bool persistent = false) {
     lv_label_set_long_mode(title_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_pos(title_label, 12, 8);
 
+    if (target.isMilitary || target.isPIA || target.isLADD) {
+        constexpr int tags_w = 260; // reserved space at the right edge of the box
+        draw_classification_tags(s_radar_info_box, DISPLAY_WIDTH - 40 - tags_w - 12, 8,
+                                  target.isMilitary, target.isPIA, target.isLADD);
+    }
+
     char metrics[96];
     snprintf(metrics, sizeof(metrics), "%d FT   %d KT   %.1f NMI   SQWK %04d",
              target.altitude, (int)target.speed, target.distance, target.squawk);
@@ -941,6 +1006,9 @@ void radar_show_nearest_info(const FlightStats &stats) {
     target.speed = ac.speed;
     target.bearing = aircraft_bearing_degrees(ac);
     target.elevation = degrees(atan2f((float)ac.altitude, ac.distance * 6076.12f));
+    target.isMilitary = ac.isMilitary;
+    target.isPIA = ac.isPIA;
+    target.isLADD = ac.isLADD;
 
     show_radar_info(target, true);
 }
@@ -1030,6 +1098,15 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
             lv_canvas_draw_arc(canvas, x - 1, y, 16, 0, 360, &highlight_dsc);
         }
 
+        if (ac.isMilitary || ac.isPIA || ac.isLADD) {
+            lv_color_t tag_color = ac.isMilitary ? COLOR_BADGE_MILITARY : (ac.isPIA ? COLOR_BADGE_PIA : COLOR_BADGE_LADD);
+            lv_draw_arc_dsc_t tag_dsc;
+            lv_draw_arc_dsc_init(&tag_dsc);
+            tag_dsc.color = tag_color;
+            tag_dsc.width = 2;
+            lv_canvas_draw_arc(canvas, x - 1, y, 13, 0, 360, &tag_dsc);
+        }
+
         lv_color_t color = altitude_color(ac.altitude);
         draw_aircraft_icon(canvas, x, y, ac, color, true);
 
@@ -1047,6 +1124,9 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
             target.speed = ac.speed;
             target.bearing = aircraft_bearing_degrees(ac);
             target.elevation = degrees(atan2f((float)ac.altitude, ac.distance * 6076.12f));
+            target.isMilitary = ac.isMilitary;
+            target.isPIA = ac.isPIA;
+            target.isLADD = ac.isLADD;
         }
 
         label_dsc.color = color;
