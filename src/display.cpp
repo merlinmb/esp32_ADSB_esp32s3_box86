@@ -955,17 +955,18 @@ void show_radar_info(const RadarHitTarget &target, bool persistent = false) {
     lv_label_set_long_mode(title_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_pos(title_label, 12, 8);
 
-    if (target.isMilitary || target.isPIA || target.isLADD) {
-        constexpr int tags_w = 260; // reserved space at the right edge of the box
-        draw_classification_tags(s_radar_info_box, DISPLAY_WIDTH - 40 - tags_w - 12, 8,
-                                  target.isMilitary, target.isPIA, target.isLADD);
-    }
-
     char metrics[96];
     snprintf(metrics, sizeof(metrics), "%d FT   %d KT   %.1f NMI   SQWK %04d",
              target.altitude, (int)target.speed, target.distance, target.squawk);
     lv_obj_t *metrics_label = create_label(s_radar_info_box, &font_jetbrainsmono_medium_12, COLOR_CYAN, metrics);
     lv_obj_set_pos(metrics_label, 12, 34);
+
+    if (target.isMilitary || target.isPIA || target.isLADD) {
+        lv_obj_update_layout(metrics_label);
+        int tags_x = 12 + lv_obj_get_width(metrics_label) + 16;
+        draw_classification_tags(s_radar_info_box, tags_x, 32,
+                                  target.isMilitary, target.isPIA, target.isLADD);
+    }
 
     String routeStr = String(target.route);
     String details = (routeStr.length() > 0 && routeStr != "Unknown")
