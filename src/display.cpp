@@ -1381,6 +1381,7 @@ void display_render_frame(uint8_t frame, const FlightStats &stats) {
     lv_obj_t *parent = begin_content(frame == FRAME_RADAR);
 
     if (stats.totalAircraft == 0) {
+        dismiss_radar_info();
         render_empty(parent);
         return;
     }
