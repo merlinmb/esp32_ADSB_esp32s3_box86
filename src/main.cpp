@@ -220,6 +220,11 @@ bool parseConfigValue(String key, String value)
     radarmap::s_always_show_nearest_info = (value == "true");
   }
 
+  if (key == "simulateemergency")
+  {
+    radarmap::s_simulate_emergency = (value == "true");
+  }
+
   if (key == "radardwellseconds")
   {
     unsigned long __seconds = value.toInt();
@@ -372,7 +377,7 @@ void setupWebServer()
   _httpServer.on("/", []()
                  {
              String __infoStr = "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'>" + style;
-             __infoStr += "<script>function syncToggles(){['brightness','mapenabled','scanline','nearestinfo'].forEach(function(id){document.getElementById(id+'Value').value=document.getElementById(id).checked?'true':'false';});document.getElementById('brightnessValue').value=document.getElementById('brightness').checked?'255':'0';}</script></head><body><main class='shell'><header class='masthead'><div class='brand'>FLIGHT RADAR<small>DEVICE CONFIGURATION</small></div><div class='badge'>ONLINE</div></header>";
+             __infoStr += "<script>function syncToggles(){['brightness','mapenabled','scanline','nearestinfo','simulateemergency'].forEach(function(id){document.getElementById(id+'Value').value=document.getElementById(id).checked?'true':'false';});document.getElementById('brightnessValue').value=document.getElementById('brightness').checked?'255':'0';}</script></head><body><main class='shell'><header class='masthead'><div class='brand'>FLIGHT RADAR<small>DEVICE CONFIGURATION</small></div><div class='badge'>ONLINE</div></header>";
              __infoStr += "<form action='/set' id='myForm' onsubmit='syncToggles()'>";
              __infoStr += "<section class='panel'><h2>DATA SOURCE</h2><div class='field'><label for='jsonURI'>Aircraft JSON URL</label><input id='jsonURI' data-lpignore='true' name='jsonURI' type='text' value='" + _locationCode + "'></div></section>";
              __infoStr += "<section class='panel'><h2>DISPLAY</h2><input type='hidden' id='brightnessValue' name='brightness'><label class='toggle'><span>Screen backlight</span><input id='brightness' type='checkbox'" + String(_brightnessHigh ? " checked" : "") + "><i class='switch'></i></label><input type='hidden' id='scanlineValue' name='scanline'><label class='toggle'><span>Radar scanning line</span><input id='scanline' type='checkbox'" + String(radarmap::s_scan_line_enabled ? " checked" : "") + "><i class='switch'></i></label><input type='hidden' id='nearestinfoValue' name='nearestinfo'><label class='toggle'><span>Always show nearest aircraft info</span><input id='nearestinfo' type='checkbox'" + String(radarmap::s_always_show_nearest_info ? " checked" : "") + "><i class='switch'></i></label><div class='field'><label for='radardwellseconds'>Radar dwell (seconds)</label><input id='radardwellseconds' name='radardwellseconds' type='number' min='60' step='1' value='" + String(_radarDwellMillis / 1000UL) + "'></div></section>";
@@ -387,6 +392,7 @@ void setupWebServer()
             }
             __infoStr += "</select></div><div class='field'><label for='maprange'>Map range (nmi)</label>";
             __infoStr += "<input id='maprange' name='maprange' type='number' min='1' max='250' step='1' value='" + String(radarmap::s_range_nmi, 0) + "'></div></section>";
+            __infoStr += "<section class='panel'><h2>DEBUG</h2><input type='hidden' id='simulateemergencyValue' name='simulateemergency'><label class='toggle'><span>Simulate emergency aircraft</span><input id='simulateemergency' type='checkbox'" + String(radarmap::s_simulate_emergency ? " checked" : "") + "><i class='switch'></i></label></section>";
             __infoStr += "<div class='actions'><input type='submit' class='btn' value='Save settings'></div></form>";
             __infoStr += "<form action='/refreshmap' class='actions'><input type='submit' class='btn secondary' value='Refresh map'></form>";
             __infoStr += "<section class='panel'><h2>CONNECTION</h2><div class='status'>";
@@ -593,6 +599,7 @@ void onTouchAdvanceFrame() { advanceFrame(); }
 void onTouchRotateBrightness() { rotateBrightness(); }
 void onTouchTriggerFetch() { triggerFetchFromButton(); }
 void onTouchToggleSysInfo() { toggleSysInfoFrame(); }
+void onTouchToggleInfoOverlay() { display_toggle_info_overlay(); }
 void onTouchReboot() { rebootESP(); }
 
 void setupWifi()
@@ -636,6 +643,16 @@ void fetchTask(void *pvParameters)
     if (fetchFlightData(host, path, port, _flightDetailsJSONDoc))
     {
       processFlightData(_flightDetailsJSONDoc, _flightStatsStaging);
+
+      // Debug/demo toggle (webserver): force the closest aircraft to read as
+      // an emergency so the emergency UI can be previewed without a real one.
+      if (radarmap::s_simulate_emergency && _flightStatsStaging.emergencyCount == 0 &&
+          _flightStatsStaging.totalAircraft > 0)
+      {
+        int __simIndex = _flightStatsStaging.closestAircraft;
+        _flightStatsStaging.aircraft[__simIndex].squawk = 7700;
+        _flightStatsStaging.emergencyAircraft[_flightStatsStaging.emergencyCount++] = __simIndex;
+      }
 
       xSemaphoreTake(_flightStatsMutex, portMAX_DELAY);
       _flightStats = _flightStatsStaging;

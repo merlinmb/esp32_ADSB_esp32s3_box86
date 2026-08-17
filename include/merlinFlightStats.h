@@ -219,15 +219,11 @@ inline void printAircraft(const AircraftDetailsStruct& AircraftToPrint)
 
 inline bool isSquawkEmergency(int squawkCode) {
     /*
-    Squawk codes are assigned by air traffic control and can be changed as needed to manage air traffic. Some common squawk codes and their meanings include:
-    Squawk 7000: This is the ‘conspicuity code’ for VFR aircraft that are not assigned a specific code by ATC.     
-    Squawk 2000: This is the ‘conspicuity code’ for IFR aircraft that are not assigned a specific code by ATC.     
-    Squawk 7700: This is the emergency squawk code, and indicates that the aircraft is in distress and needs priority handling from air traffic control.    
-    Squawk 7500: This code indicates that the aircraft is subject to unlawful interference (hijack).    
-    Squawk 7600: This code indicates that the aircraft has experienced a radio failure and is unable to transmit or receive messages.    
-    Squawk 0030:: This code indicates that the aircraft is lost (UK specific). 
+    Squawk 7700: This is the emergency squawk code, and indicates that the aircraft is in distress and needs priority handling from air traffic control.
+    Squawk 7500: This code indicates that the aircraft is subject to unlawful interference (hijack).
+    Squawk 7600: This code indicates that the aircraft has experienced a radio failure and is unable to transmit or receive messages.
     */
-    return (squawkCode == 30 || squawkCode == 7600 || squawkCode == 7500 || squawkCode == 7700 || squawkCode == 2000);
+    return (squawkCode == 7600 || squawkCode == 7500 || squawkCode == 7700);
 }
 
 // readsb/tar1090 dbFlags bitfield: bit0=military, bit1=interesting, bit2=PIA, bit3=LADD

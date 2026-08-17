@@ -275,7 +275,7 @@ const lv_color_t COLOR_YELLOW   = lv_color_hex(0xffd23f);
 const lv_color_t COLOR_CYAN     = lv_color_hex(0x00e5ff);
 const lv_color_t COLOR_MAGENTA  = lv_color_hex(0xd23fff);
 const lv_color_t COLOR_CLOCK    = lv_color_hex(0xffffff);
-const lv_color_t COLOR_BADGE_MILITARY = lv_color_hex(0xb5423a);
+const lv_color_t COLOR_BADGE_MILITARY = lv_color_hex(0xffffff);
 const lv_color_t COLOR_BADGE_PIA      = lv_color_hex(0x2f8f5b);
 const lv_color_t COLOR_BADGE_LADD     = lv_color_hex(0x2f7f8f);
 
@@ -284,13 +284,21 @@ lv_obj_t *s_content       = nullptr;
 lv_obj_t *s_clock_label   = nullptr;
 lv_obj_t *s_touch_zone_left  = nullptr;
 lv_obj_t *s_touch_zone_right = nullptr;
+lv_obj_t *s_touch_zone_top   = nullptr;
 lv_obj_t *s_startup_log      = nullptr;
 lv_obj_t *s_radar_info_box   = nullptr;
 lv_timer_t *s_radar_info_timer = nullptr;
 bool s_startup_active        = true;
 constexpr uint8_t STARTUP_LOG_LINES = 14;
 String s_startup_lines[STARTUP_LOG_LINES];
-constexpr int TOUCH_ZONE_SIZE = 32;
+constexpr int TOUCH_ZONE_SIZE = 44;
+constexpr int TOUCH_ZONE_TOP_HEIGHT = 48;
+
+// Info overlay: topmost panel toggled by tapping the top strip of the screen.
+// Parented to s_root (not s_content) so it survives begin_content() clears
+// and always renders above the current carousel frame.
+lv_obj_t *s_info_overlay = nullptr;
+bool s_info_overlay_visible = false;
 
 // Double-tap detection state, mirrors the debounce style used for GT911 reads.
 unsigned long s_last_left_tap_ms  = 0;
@@ -308,7 +316,7 @@ lv_obj_t *create_label(lv_obj_t *parent, const lv_font_t *font,
 
 // Draws a small pill-shaped tag (e.g. "MILITARY") at (x, y); returns its width
 // so callers can lay out subsequent tags to the right.
-int draw_classification_tag(lv_obj_t *parent, int x, int y, const char *text, lv_color_t color) {
+int draw_classification_tag(lv_obj_t *parent, int x, int y, const char *text, lv_color_t color, lv_color_t text_color) {
     constexpr int tag_h = 20;
     constexpr int pad_x = 8;
     lv_obj_t *tag = lv_obj_create(parent);
@@ -317,7 +325,7 @@ int draw_classification_tag(lv_obj_t *parent, int x, int y, const char *text, lv
     lv_obj_set_style_pad_all(tag, 0, 0);
     lv_obj_set_style_border_width(tag, 0, 0);
     lv_obj_clear_flag(tag, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t *label = create_label(tag, &font_inter_regular_12, lv_color_white(), text);
+    lv_obj_t *label = create_label(tag, &font_inter_regular_12, text_color, text);
     lv_obj_set_pos(label, pad_x, 3);
     lv_obj_update_layout(label);
     int text_w = lv_obj_get_width(label);
@@ -334,13 +342,13 @@ void draw_classification_tags(lv_obj_t *parent, int x, int y,
     constexpr int tag_gap = 6;
     int cursor_x = x;
     if (isMilitary) {
-        cursor_x += draw_classification_tag(parent, cursor_x, y, "MILITARY", COLOR_BADGE_MILITARY) + tag_gap;
+        cursor_x += draw_classification_tag(parent, cursor_x, y, "MILITARY", COLOR_BADGE_MILITARY, lv_color_black()) + tag_gap;
     }
     if (isPIA) {
-        cursor_x += draw_classification_tag(parent, cursor_x, y, "PIA", COLOR_BADGE_PIA) + tag_gap;
+        cursor_x += draw_classification_tag(parent, cursor_x, y, "PIA", COLOR_BADGE_PIA, lv_color_white()) + tag_gap;
     }
     if (isLADD) {
-        cursor_x += draw_classification_tag(parent, cursor_x, y, "LADD", COLOR_BADGE_LADD) + tag_gap;
+        cursor_x += draw_classification_tag(parent, cursor_x, y, "LADD", COLOR_BADGE_LADD, lv_color_white()) + tag_gap;
     }
 }
 
@@ -370,6 +378,10 @@ void left_zone_long_press_cb(lv_event_t *e) {
     onTouchReboot();
 }
 
+void top_zone_click_cb(lv_event_t *e) {
+    onTouchToggleInfoOverlay();
+}
+
 void create_touch_zones() {
     s_touch_zone_left = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_touch_zone_left);
@@ -387,6 +399,15 @@ void create_touch_zones() {
     lv_obj_add_flag(s_touch_zone_right, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(s_touch_zone_right, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_touch_zone_right, right_zone_click_cb, LV_EVENT_CLICKED, nullptr);
+
+    s_touch_zone_top = lv_obj_create(s_root);
+    lv_obj_remove_style_all(s_touch_zone_top);
+    lv_obj_set_size(s_touch_zone_top, DISPLAY_WIDTH, TOUCH_ZONE_TOP_HEIGHT);
+    lv_obj_align(s_touch_zone_top, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_add_flag(s_touch_zone_top, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_touch_zone_top, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_touch_zone_top, top_zone_click_cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_move_foreground(s_touch_zone_top); // stay clickable above the info overlay itself
 }
 
 lv_color_t altitude_color(int altitude) {
@@ -646,7 +667,7 @@ void render_topstats(lv_obj_t *parent, const FlightStats &stats) {
 }
 
 void render_aircraft_card(lv_obj_t *parent, const FlightStats &stats, const AircraftDetailsStruct &aircraft, bool is_emergency) {
-    if (is_emergency) {
+    if (is_emergency || isSquawkEmergency(aircraft.squawk)) {
         lv_obj_set_style_border_color(parent, COLOR_RED, 0);
         lv_obj_set_style_border_width(parent, 4, 0);
     }
@@ -890,6 +911,7 @@ lv_obj_t     *s_radar_canvas = nullptr;
 lv_obj_t     *s_radar_sweep_canvas = nullptr; // transparent overlay, redrawn fast
 lv_color_t   *s_radar_sweep_buf = nullptr;
 lv_timer_t   *s_radar_sweep_timer = nullptr;
+lv_obj_t     *s_emergency_banner = nullptr; // parented to s_root; see render_radar()
 
 struct RadarHitTarget {
     int x;
@@ -907,6 +929,7 @@ struct RadarHitTarget {
     bool isMilitary;
     bool isPIA;
     bool isLADD;
+    bool isEmergency;
 };
 
 RadarHitTarget s_radar_hit_targets[100];
@@ -943,7 +966,7 @@ void show_radar_info(const RadarHitTarget &target, bool persistent = false) {
     lv_obj_set_pos(s_radar_info_box, 20, DISPLAY_HEIGHT - 132);
     lv_obj_set_style_bg_color(s_radar_info_box, lv_color_hex(0x111520), 0);
     lv_obj_set_style_bg_opa(s_radar_info_box, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(s_radar_info_box, COLOR_CYAN, 0);
+    lv_obj_set_style_border_color(s_radar_info_box, target.isEmergency ? COLOR_RED : COLOR_CYAN, 0);
     lv_obj_set_style_border_width(s_radar_info_box, 1, 0);
     lv_obj_set_style_radius(s_radar_info_box, 8, 0);
     lv_obj_set_style_pad_all(s_radar_info_box, 0, 0);
@@ -995,7 +1018,22 @@ void radar_show_nearest_info(const FlightStats &stats) {
         return;
     }
 
-    const AircraftDetailsStruct &ac = stats.aircraft[stats.closestAircraft];
+    // While any aircraft is in an emergency state, follow the nearest one in
+    // distress instead of the geometrically closest aircraft overall.
+    int followIndex = stats.closestAircraft;
+    if (stats.emergencyCount > 0) {
+        float bestDistance = std::numeric_limits<float>::max();
+        for (int i = 0; i < stats.emergencyCount; i++) {
+            int idx = stats.emergencyAircraft[i];
+            if (idx < 0 || idx >= stats.totalAircraft) continue;
+            if (stats.aircraft[idx].distance < bestDistance) {
+                bestDistance = stats.aircraft[idx].distance;
+                followIndex = idx;
+            }
+        }
+    }
+
+    const AircraftDetailsStruct &ac = stats.aircraft[followIndex];
     RadarHitTarget target{};
     snprintf(target.identifier, sizeof(target.identifier), "%s", ac.identifier.c_str());
     snprintf(target.description, sizeof(target.description), "%s", ac.description.c_str());
@@ -1010,6 +1048,7 @@ void radar_show_nearest_info(const FlightStats &stats) {
     target.isMilitary = ac.isMilitary;
     target.isPIA = ac.isPIA;
     target.isLADD = ac.isLADD;
+    target.isEmergency = isSquawkEmergency(ac.squawk);
 
     show_radar_info(target, true);
 }
@@ -1071,6 +1110,22 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
 
     const float rangeNmi = radar_range_nmi();
 
+    // While any aircraft is in an emergency state, the "nearest info" ring
+    // follows the nearest one in distress rather than the closest overall —
+    // keep this in sync with radar_show_nearest_info()'s selection.
+    int followIndex = stats.closestAircraft;
+    if (stats.emergencyCount > 0) {
+        float bestDistance = std::numeric_limits<float>::max();
+        for (int i = 0; i < stats.emergencyCount; i++) {
+            int idx = stats.emergencyAircraft[i];
+            if (idx < 0 || idx >= stats.totalAircraft) continue;
+            if (stats.aircraft[idx].distance < bestDistance) {
+                bestDistance = stats.aircraft[idx].distance;
+                followIndex = idx;
+            }
+        }
+    }
+
     s_radar_hit_target_count = 0;
     for (int i = 0; i < stats.totalAircraft; i++) {
         const AircraftDetailsStruct &ac = stats.aircraft[i];
@@ -1090,7 +1145,7 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
         if (x < ICON_RADIUS || x >= DISPLAY_WIDTH - ICON_RADIUS ||
             y < ICON_RADIUS || y >= DISPLAY_HEIGHT - ICON_RADIUS) continue;
 
-        bool isClosest = radarmap::s_always_show_nearest_info && i == stats.closestAircraft;
+        bool isClosest = (radarmap::s_always_show_nearest_info || stats.emergencyCount > 0) && i == followIndex;
         if (isClosest) {
             lv_draw_arc_dsc_t highlight_dsc;
             lv_draw_arc_dsc_init(&highlight_dsc);
@@ -1106,6 +1161,15 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
             tag_dsc.color = tag_color;
             tag_dsc.width = 2;
             lv_canvas_draw_arc(canvas, x - 1, y, 13, 0, 360, &tag_dsc);
+        }
+
+        bool isEmergency = isSquawkEmergency(ac.squawk);
+        if (isEmergency) {
+            lv_draw_arc_dsc_t emergency_dsc;
+            lv_draw_arc_dsc_init(&emergency_dsc);
+            emergency_dsc.color = COLOR_RED;
+            emergency_dsc.width = 4;
+            lv_canvas_draw_arc(canvas, x - 1, y, 19, 0, 360, &emergency_dsc);
         }
 
         lv_color_t color = altitude_color(ac.altitude);
@@ -1128,6 +1192,7 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
             target.isMilitary = ac.isMilitary;
             target.isPIA = ac.isPIA;
             target.isLADD = ac.isLADD;
+            target.isEmergency = isEmergency;
         }
 
         label_dsc.color = color;
@@ -1204,7 +1269,35 @@ void render_radar(lv_obj_t *parent, const FlightStats &stats) {
     radar_draw_static(s_radar_canvas);
     radar_draw_aircraft(s_radar_canvas, stats);
 
-    if (radarmap::s_always_show_nearest_info) {
+    if (s_emergency_banner) {
+        lv_obj_del(s_emergency_banner);
+        s_emergency_banner = nullptr;
+    }
+    if (stats.emergencyCount > 0) {
+        // Top margin keeps the banner's rounded top edge fully on-screen —
+        // a negative y here previously left a stray sliver of the box
+        // visible past the top edge.
+        constexpr int BANNER_TOP_MARGIN = 8;
+        constexpr int BANNER_HEIGHT = 40;
+
+        // Parented directly to s_root (not s_content) so it stacks above the
+        // radar canvas in the screen's own z-order.
+        s_emergency_banner = lv_obj_create(s_root);
+        lv_obj_remove_style_all(s_emergency_banner);
+        lv_obj_set_size(s_emergency_banner, DISPLAY_WIDTH - 40, BANNER_HEIGHT);
+        lv_obj_set_pos(s_emergency_banner, 20, BANNER_TOP_MARGIN);
+        lv_obj_set_style_bg_color(s_emergency_banner, COLOR_RED, 0);
+        lv_obj_set_style_bg_opa(s_emergency_banner, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(s_emergency_banner, 8, 0);
+        lv_obj_clear_flag(s_emergency_banner, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *banner_label = create_label(s_emergency_banner, &font_inter_bold_18, lv_color_white(), "EMERGENCY");
+        lv_obj_align(banner_label, LV_ALIGN_BOTTOM_MID, 0, -8);
+
+        lv_obj_move_foreground(s_emergency_banner);
+    }
+
+    if (radarmap::s_always_show_nearest_info || stats.emergencyCount > 0) {
         radar_show_nearest_info(stats);
     }
 
@@ -1251,6 +1344,58 @@ void radar_stop() {
     s_radar_canvas_holder = nullptr;
     s_radar_canvas = nullptr;
     s_radar_sweep_canvas = nullptr;
+    if (s_emergency_banner) {
+        lv_obj_del(s_emergency_banner);
+        s_emergency_banner = nullptr;
+    }
+}
+
+// Rebuilds the info overlay's content in place. Called whenever a frame is
+// rendered so the figures stay current even while the overlay is visible.
+void update_info_overlay(uint8_t frame, const FlightStats &stats) {
+    if (!s_info_overlay) return;
+    lv_obj_clean(s_info_overlay); // drop previous labels, keep the panel itself
+
+    render_screen_header(s_info_overlay, "DEVICE INFO", "System & Feed Status");
+
+    char heapStr[16];
+    snprintf(heapStr, sizeof(heapStr), "%u B", (unsigned)ESP.getFreeHeap());
+    char rssiStr[8];
+    snprintf(rssiStr, sizeof(rssiStr), "%d%%", (int)WiFi.RSSI());
+
+    lv_obj_t *device_panel = create_metric_panel(s_info_overlay, 20, 98, 440, 108);
+    metric_label(device_panel, 16, 14, "DEVICE NAME", WiFi.getHostname(), COLOR_TEXT_1);
+    metric_label(device_panel, 230, 14, "SIGNAL", rssiStr, COLOR_CYAN);
+    metric_label(device_panel, 16, 62, "IP ADDRESS", WiFi.localIP().toString().c_str(), COLOR_TEXT_1);
+    metric_label(device_panel, 230, 62, "FREE HEAP", heapStr, COLOR_GREEN);
+
+    char parsedStr[8];
+    snprintf(parsedStr, sizeof(parsedStr), "%d", stats.totalAircraft);
+    char shownStr[8];
+    if (frame == FRAME_RADAR) {
+        snprintf(shownStr, sizeof(shownStr), "%d", (int)s_radar_hit_target_count);
+    } else {
+        snprintf(shownStr, sizeof(shownStr), "%d", stats.totalAircraft);
+    }
+    char emergencyStr[8];
+    snprintf(emergencyStr, sizeof(emergencyStr), "%d", stats.emergencyCount);
+
+    lv_obj_t *feed_panel = create_metric_panel(s_info_overlay, 20, 220, 440, 108);
+    metric_label(feed_panel, 16, 14, "AIRCRAFT PARSED", parsedStr, COLOR_TEXT_1);
+    metric_label(feed_panel, 230, 14, "SHOWN IN VIEW", shownStr, COLOR_CYAN);
+    metric_label(feed_panel, 16, 62, "EMERGENCY", emergencyStr,
+                 stats.emergencyCount > 0 ? COLOR_RED : COLOR_GREEN);
+    metric_label(feed_panel, 230, 62, "DATA SOURCE", host, COLOR_TEXT_1);
+
+    lv_obj_t *hint = create_label(s_info_overlay, &font_inter_regular_12, COLOR_TEXT_3, "Tap top of screen to dismiss");
+    lv_obj_set_pos(hint, 20, 350);
+
+    // Runs after per-frame overlays (emergency banner, radar info box) have
+    // foregrounded themselves, so re-assert top stacking whenever visible.
+    if (s_info_overlay_visible) {
+        lv_obj_move_foreground(s_info_overlay);
+        lv_obj_move_foreground(s_touch_zone_top);
+    }
 }
 
 } // namespace
@@ -1366,6 +1511,16 @@ void display_init() {
     lv_obj_align(s_clock_label, LV_ALIGN_BOTTOM_MID, 0, -10);
     lv_obj_move_foreground(s_clock_label);
 
+    s_info_overlay = lv_obj_create(s_root);
+    lv_obj_set_size(s_info_overlay, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_set_pos(s_info_overlay, 0, 0);
+    lv_obj_set_style_bg_color(s_info_overlay, COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(s_info_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_info_overlay, 0, 0);
+    lv_obj_set_style_radius(s_info_overlay, 0, 0);
+    lv_obj_clear_flag(s_info_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_info_overlay, LV_OBJ_FLAG_HIDDEN);
+
     s_display_ready = true;
     Serial.println("display_init: done");
     Serial.printf("SRAM free: %d  PSRAM free: %d\n",
@@ -1383,6 +1538,7 @@ void display_render_frame(uint8_t frame, const FlightStats &stats) {
     if (stats.totalAircraft == 0) {
         dismiss_radar_info();
         render_empty(parent);
+        update_info_overlay(frame, stats);
         return;
     }
 
@@ -1416,6 +1572,20 @@ void display_render_frame(uint8_t frame, const FlightStats &stats) {
     } else {
         lv_obj_clear_flag(s_clock_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_clock_label);
+    }
+
+    update_info_overlay(frame, stats);
+}
+
+void display_toggle_info_overlay() {
+    if (!s_info_overlay) return;
+    s_info_overlay_visible = !s_info_overlay_visible;
+    if (s_info_overlay_visible) {
+        lv_obj_clear_flag(s_info_overlay, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(s_info_overlay);
+        lv_obj_move_foreground(s_touch_zone_top);
+    } else {
+        lv_obj_add_flag(s_info_overlay, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
