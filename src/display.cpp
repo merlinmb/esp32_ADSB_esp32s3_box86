@@ -623,7 +623,7 @@ void render_sysinfo(lv_obj_t *parent, const FlightStats &stats) {
 
     lv_obj_t *network_panel = create_metric_panel(parent, 20, 98, 440, 92);
     metric_label(network_panel, 16, 14, "NETWORK", WiFi.SSID().c_str(), COLOR_TEXT_1);
-    metric_label(network_panel, 230, 14, "SIGNAL", rssiStr, COLOR_CYAN);
+    metric_label(network_panel, 230, 14, "WIFI SIGNAL", rssiStr, COLOR_CYAN);
     metric_label(network_panel, 16, 54, "ADDRESS", WiFi.localIP().toString().c_str(), COLOR_TEXT_1);
 
     lv_obj_t *memory_panel = create_metric_panel(parent, 20, 204, 440, 58);
@@ -1359,13 +1359,13 @@ void update_info_overlay(uint8_t frame, const FlightStats &stats) {
     render_screen_header(s_info_overlay, "DEVICE INFO", "System & Feed Status");
 
     char heapStr[16];
-    snprintf(heapStr, sizeof(heapStr), "%u B", (unsigned)ESP.getFreeHeap());
+    snprintf(heapStr, sizeof(heapStr), "%u Bytes", (unsigned)ESP.getFreeHeap());
     char rssiStr[8];
     snprintf(rssiStr, sizeof(rssiStr), "%d%%", (int)WiFi.RSSI());
 
     lv_obj_t *device_panel = create_metric_panel(s_info_overlay, 20, 98, 440, 108);
     metric_label(device_panel, 16, 14, "DEVICE NAME", WiFi.getHostname(), COLOR_TEXT_1);
-    metric_label(device_panel, 230, 14, "SIGNAL", rssiStr, COLOR_CYAN);
+    metric_label(device_panel, 230, 14, "WIFI SIGNAL", rssiStr, COLOR_CYAN);
     metric_label(device_panel, 16, 62, "IP ADDRESS", WiFi.localIP().toString().c_str(), COLOR_TEXT_1);
     metric_label(device_panel, 230, 62, "FREE HEAP", heapStr, COLOR_GREEN);
 
@@ -1394,8 +1394,15 @@ void update_info_overlay(uint8_t frame, const FlightStats &stats) {
     // foregrounded themselves, so re-assert top stacking whenever visible.
     if (s_info_overlay_visible) {
         lv_obj_move_foreground(s_info_overlay);
-        lv_obj_move_foreground(s_touch_zone_top);
     }
+
+    // Per-frame overlays (emergency banner, radar info box) foreground
+    // themselves above the touch zones every render; re-assert the touch
+    // zones on top every time, not just while the info overlay is visible,
+    // or taps stop reaching them whenever an emergency/radar info box is showing.
+    lv_obj_move_foreground(s_touch_zone_left);
+    lv_obj_move_foreground(s_touch_zone_right);
+    lv_obj_move_foreground(s_touch_zone_top);
 }
 
 } // namespace

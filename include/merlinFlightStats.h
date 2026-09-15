@@ -73,7 +73,7 @@ struct FlightStats {
     byte closestAircraft;
     byte farthestAircraft;
     int emergencyAircraft[10]; // Store up to 10 emergencies
-    AircraftDetailsStruct aircraft[100]; // Store up to 100 aircraft
+    AircraftDetailsStruct aircraft[150]; // Store up to 150 aircraft
 };
 
 inline FlightStats _flightStats;
@@ -141,7 +141,11 @@ inline bool fetchFlightData(const char* host, const char* path, const int port, 
         DEBUG_PRINTLN("Connection failed!");
         return false;
     }
-    client.setTimeout(5000);
+    // Per-read timeout used by readStringUntil()/the streaming parser below.
+    // 105+ aircraft can take several seconds for the server to generate and
+    // send, so this must be generous enough to cover gaps between TCP reads,
+    // not the whole transfer.
+    client.setTimeout(10000);
 
     // HTTP/1.0 avoids chunked transfer encoding, which would embed hex chunk-size
     // markers in the body and corrupt the JSON stream.
@@ -152,13 +156,28 @@ inline bool fetchFlightData(const char* host, const char* path, const int port, 
 
     DEBUG_PRINTLN("Fetching response");
 
-    // Skip HTTP headers
+    // Skip HTTP headers. readStringUntil() returns "" both for a real blank
+    // line (end of headers) and for a read timeout — with a larger/slower
+    // response, a timeout mid-headers was being misread as end-of-headers,
+    // leaving the parser to start on header bytes instead of JSON. Only
+    // treat a genuine "\r" line as the end of headers; give up after a
+    // bounded number of empty reads instead of retrying indefinitely, which
+    // previously hung the task long enough to trip the watchdog and reboot.
     DEBUG_PRINTLN("Skipping Headers");
+    int __emptyReads = 0;
     while (client.connected() || client.available()) {
         String line = client.readStringUntil('\n');
-        if (line == "\r" || line == "\r\n" || line.length() == 0) {
+        if (line == "\r") {
             break;
         }
+        if (line.length() == 0) {
+            if (++__emptyReads >= 3) {
+                DEBUG_PRINTLN("Timed out skipping headers");
+                return false;
+            }
+            continue;
+        }
+        __emptyReads = 0;
     }
 
     // Filter: only keep the fields we actually use in processFlightData().
