@@ -1,5 +1,6 @@
 #include "display.h"
 #include "merlinRadarMap.h"
+#include "merlinWeatherRadar.h"
 
 #include <Arduino.h>
 #include <Arduino_GFX_Library.h>
@@ -285,6 +286,7 @@ lv_obj_t *s_clock_label   = nullptr;
 lv_obj_t *s_touch_zone_left  = nullptr;
 lv_obj_t *s_touch_zone_right = nullptr;
 lv_obj_t *s_touch_zone_top   = nullptr;
+lv_obj_t *s_touch_zone_top_right = nullptr;
 lv_obj_t *s_startup_log      = nullptr;
 lv_obj_t *s_radar_info_box   = nullptr;
 lv_timer_t *s_radar_info_timer = nullptr;
@@ -294,7 +296,7 @@ String s_startup_lines[STARTUP_LOG_LINES];
 constexpr int TOUCH_ZONE_SIZE = 44;
 constexpr int TOUCH_ZONE_TOP_HEIGHT = 48;
 
-// Info overlay: topmost panel toggled by tapping the top strip of the screen.
+// Info overlay: topmost panel toggled by tapping the top-left of the screen.
 // Parented to s_root (not s_content) so it survives begin_content() clears
 // and always renders above the current carousel frame.
 lv_obj_t *s_info_overlay = nullptr;
@@ -382,6 +384,13 @@ void top_zone_click_cb(lv_event_t *e) {
     onTouchToggleInfoOverlay();
 }
 
+void top_right_zone_click_cb(lv_event_t *e) {
+    // The weather overlay only exists on the radar screen; ignore taps while
+    // the info overlay covers it.
+    if (!display_radar_visible() || s_info_overlay_visible) return;
+    onTouchToggleWeather();
+}
+
 void create_touch_zones() {
     s_touch_zone_left = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_touch_zone_left);
@@ -402,12 +411,20 @@ void create_touch_zones() {
 
     s_touch_zone_top = lv_obj_create(s_root);
     lv_obj_remove_style_all(s_touch_zone_top);
-    lv_obj_set_size(s_touch_zone_top, DISPLAY_WIDTH, TOUCH_ZONE_TOP_HEIGHT);
-    lv_obj_align(s_touch_zone_top, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_size(s_touch_zone_top, DISPLAY_WIDTH / 2, TOUCH_ZONE_TOP_HEIGHT);
+    lv_obj_align(s_touch_zone_top, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_add_flag(s_touch_zone_top, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(s_touch_zone_top, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_touch_zone_top, top_zone_click_cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_move_foreground(s_touch_zone_top); // stay clickable above the info overlay itself
+
+    s_touch_zone_top_right = lv_obj_create(s_root);
+    lv_obj_remove_style_all(s_touch_zone_top_right);
+    lv_obj_set_size(s_touch_zone_top_right, DISPLAY_WIDTH / 2, TOUCH_ZONE_TOP_HEIGHT);
+    lv_obj_align(s_touch_zone_top_right, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_add_flag(s_touch_zone_top_right, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_touch_zone_top_right, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_touch_zone_top_right, top_right_zone_click_cb, LV_EVENT_CLICKED, nullptr);
 }
 
 lv_color_t altitude_color(int altitude) {
@@ -933,6 +950,11 @@ struct RadarHitTarget {
 };
 
 RadarHitTarget s_radar_hit_targets[100];
+
+// Aircraft tapped on the radar. While set, it takes the highlight ring and
+// info box over the nearest/emergency aircraft; cleared when its info box
+// times out or is dismissed.
+String s_selected_identifier;
 uint8_t s_radar_hit_target_count = 0;
 constexpr int RADAR_HIT_RADIUS_PX = 18;
 
@@ -943,6 +965,7 @@ int radar_center_y() { return DISPLAY_HEIGHT / 2; }
 int radar_outer_radius() { return (DISPLAY_WIDTH < DISPLAY_HEIGHT ? DISPLAY_WIDTH : DISPLAY_HEIGHT) / 2 - 30; }
 
 void dismiss_radar_info() {
+    s_selected_identifier = "";
     if (s_radar_info_timer) {
         lv_timer_del(s_radar_info_timer);
         s_radar_info_timer = nullptr;
@@ -955,7 +978,9 @@ void dismiss_radar_info() {
 
 void radar_info_timeout_cb(lv_timer_t *timer) {
     (void)timer;
+    bool had_selection = !s_selected_identifier.isEmpty();
     dismiss_radar_info();
+    if (had_selection) onRadarSelectionChanged(); // move the highlight back
 }
 
 void show_radar_info(const RadarHitTarget &target, bool persistent = false) {
@@ -1012,14 +1037,9 @@ void show_radar_info(const RadarHitTarget &target, bool persistent = false) {
     }
 }
 
-void radar_show_nearest_info(const FlightStats &stats) {
-    if (stats.totalAircraft <= 0 || stats.closestAircraft >= stats.totalAircraft) {
-        dismiss_radar_info();
-        return;
-    }
-
-    // While any aircraft is in an emergency state, follow the nearest one in
-    // distress instead of the geometrically closest aircraft overall.
+// While any aircraft is in an emergency state, follow the nearest one in
+// distress instead of the geometrically closest aircraft overall.
+int radar_follow_index(const FlightStats &stats) {
     int followIndex = stats.closestAircraft;
     if (stats.emergencyCount > 0) {
         float bestDistance = std::numeric_limits<float>::max();
@@ -1032,8 +1052,28 @@ void radar_show_nearest_info(const FlightStats &stats) {
             }
         }
     }
+    return followIndex;
+}
 
-    const AircraftDetailsStruct &ac = stats.aircraft[followIndex];
+// Aircraft that gets the highlight ring: the tapped one while selected,
+// otherwise the followed one when nearest-info or an emergency is active.
+int radar_highlight_index(const FlightStats &stats) {
+    if (!s_selected_identifier.isEmpty()) {
+        for (int i = 0; i < stats.totalAircraft; i++) {
+            if (stats.aircraft[i].identifier == s_selected_identifier) return i;
+        }
+    }
+    if (radarmap::s_always_show_nearest_info || stats.emergencyCount > 0) return radar_follow_index(stats);
+    return -1;
+}
+
+void radar_show_nearest_info(const FlightStats &stats) {
+    if (stats.totalAircraft <= 0 || stats.closestAircraft >= stats.totalAircraft) {
+        dismiss_radar_info();
+        return;
+    }
+
+    const AircraftDetailsStruct &ac = stats.aircraft[radar_follow_index(stats)];
     RadarHitTarget target{};
     snprintf(target.identifier, sizeof(target.identifier), "%s", ac.identifier.c_str());
     snprintf(target.description, sizeof(target.description), "%s", ac.description.c_str());
@@ -1070,7 +1110,11 @@ void radar_canvas_click_cb(lv_event_t *event) {
             closest_index = i;
         }
     }
-    if (closest_index >= 0) show_radar_info(s_radar_hit_targets[closest_index]);
+    if (closest_index >= 0) {
+        show_radar_info(s_radar_hit_targets[closest_index]);
+        s_selected_identifier = s_radar_hit_targets[closest_index].identifier;
+        onRadarSelectionChanged(); // redraw so the highlight ring moves to it
+    }
 }
 
 void radar_draw_static(lv_obj_t *canvas) {
@@ -1110,21 +1154,7 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
 
     const float rangeNmi = radar_range_nmi();
 
-    // While any aircraft is in an emergency state, the "nearest info" ring
-    // follows the nearest one in distress rather than the closest overall —
-    // keep this in sync with radar_show_nearest_info()'s selection.
-    int followIndex = stats.closestAircraft;
-    if (stats.emergencyCount > 0) {
-        float bestDistance = std::numeric_limits<float>::max();
-        for (int i = 0; i < stats.emergencyCount; i++) {
-            int idx = stats.emergencyAircraft[i];
-            if (idx < 0 || idx >= stats.totalAircraft) continue;
-            if (stats.aircraft[idx].distance < bestDistance) {
-                bestDistance = stats.aircraft[idx].distance;
-                followIndex = idx;
-            }
-        }
-    }
+    const int highlightIndex = radar_highlight_index(stats);
 
     s_radar_hit_target_count = 0;
     for (int i = 0; i < stats.totalAircraft; i++) {
@@ -1145,8 +1175,8 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
         if (x < ICON_RADIUS || x >= DISPLAY_WIDTH - ICON_RADIUS ||
             y < ICON_RADIUS || y >= DISPLAY_HEIGHT - ICON_RADIUS) continue;
 
-        bool isClosest = (radarmap::s_always_show_nearest_info || stats.emergencyCount > 0) && i == followIndex;
-        if (isClosest) {
+        bool isHighlighted = i == highlightIndex;
+        if (isHighlighted) {
             lv_draw_arc_dsc_t highlight_dsc;
             lv_draw_arc_dsc_init(&highlight_dsc);
             highlight_dsc.color = COLOR_CYAN;
@@ -1198,10 +1228,41 @@ void radar_draw_aircraft(lv_obj_t *canvas, const FlightStats &stats) {
         label_dsc.color = color;
         char idBuf[12];
         snprintf(idBuf, sizeof(idBuf), "%s", ac.identifier.c_str());
-        int labelX = isClosest ? x + 17 : x + 8;
+        int labelX = isHighlighted ? x + 17 : x + 8;
         lv_area_t label_area = {(lv_coord_t)labelX, (lv_coord_t)(y - 8), (lv_coord_t)(labelX + 92), (lv_coord_t)(y + 8)};
         lv_canvas_draw_text(canvas, label_area.x1, label_area.y1, 92, &label_dsc, idBuf);
     }
+}
+
+// Small cloud in the top-right corner marking the weather overlay toggle
+// (s_touch_zone_top_right). Cyan while showing weather, yellow while enabled
+// but still waiting on a fetch, grey when off.
+void radar_draw_weather_icon(lv_obj_t *canvas) {
+    const lv_color_t color = !weatherradar::s_enabled     ? COLOR_TEXT_2
+                           : weatherradar::overlay_valid() ? COLOR_CYAN
+                                                           : COLOR_YELLOW;
+    constexpr int x = DISPLAY_WIDTH - 46;
+    constexpr int y = 14;
+
+    // Outline only: four arcs tracing the outer edge of the cloud's puffs
+    // (angles meet at the circles' intersections, overlapped a few degrees
+    // to close the joins) plus the flat base.
+    lv_draw_arc_dsc_t arc_dsc;
+    lv_draw_arc_dsc_init(&arc_dsc);
+    arc_dsc.color = color;
+    arc_dsc.width = 2;
+    lv_canvas_draw_arc(canvas, x + 6, y + 14, 6, 90, 265, &arc_dsc);  // left end
+    lv_canvas_draw_arc(canvas, x + 11, y + 9, 6, 185, 290, &arc_dsc); // left puff
+    lv_canvas_draw_arc(canvas, x + 19, y + 8, 8, 212, 10, &arc_dsc);  // top puff
+    lv_canvas_draw_arc(canvas, x + 24, y + 14, 6, 295, 90, &arc_dsc); // right end
+
+    lv_draw_line_dsc_t line_dsc;
+    lv_draw_line_dsc_init(&line_dsc);
+    line_dsc.color = color;
+    line_dsc.width = 2;
+    lv_point_t base[2] = {{(lv_coord_t)(x + 6), (lv_coord_t)(y + 19)},
+                          {(lv_coord_t)(x + 24), (lv_coord_t)(y + 19)}};
+    lv_canvas_draw_line(canvas, base, 2, &line_dsc);
 }
 
 void radar_sweep_timer_cb(lv_timer_t *timer) {
@@ -1265,9 +1326,11 @@ void render_radar(lv_obj_t *parent, const FlightStats &stats) {
     } else {
         lv_canvas_fill_bg(s_radar_canvas, COLOR_BG, LV_OPA_COVER);
     }
+    weatherradar::blend_into(s_radar_canvas_buf); // above the basemap, below rings/aircraft
 
     radar_draw_static(s_radar_canvas);
     radar_draw_aircraft(s_radar_canvas, stats);
+    radar_draw_weather_icon(s_radar_canvas);
 
     if (s_emergency_banner) {
         lv_obj_del(s_emergency_banner);
@@ -1297,7 +1360,8 @@ void render_radar(lv_obj_t *parent, const FlightStats &stats) {
         lv_obj_move_foreground(s_emergency_banner);
     }
 
-    if (radarmap::s_always_show_nearest_info || stats.emergencyCount > 0) {
+    // A tapped aircraft keeps its own info box until it times out.
+    if ((radarmap::s_always_show_nearest_info || stats.emergencyCount > 0) && s_selected_identifier.isEmpty()) {
         radar_show_nearest_info(stats);
     }
 
@@ -1387,7 +1451,7 @@ void update_info_overlay(uint8_t frame, const FlightStats &stats) {
                  stats.emergencyCount > 0 ? COLOR_RED : COLOR_GREEN);
     metric_label(feed_panel, 230, 62, "DATA SOURCE", host, COLOR_TEXT_1);
 
-    lv_obj_t *hint = create_label(s_info_overlay, &font_inter_regular_12, COLOR_TEXT_3, "Tap top of screen to dismiss");
+    lv_obj_t *hint = create_label(s_info_overlay, &font_inter_regular_12, COLOR_TEXT_3, "Tap top left of screen to dismiss");
     lv_obj_set_pos(hint, 20, 350);
 
     // Runs after per-frame overlays (emergency banner, radar info box) have
@@ -1403,6 +1467,7 @@ void update_info_overlay(uint8_t frame, const FlightStats &stats) {
     lv_obj_move_foreground(s_touch_zone_left);
     lv_obj_move_foreground(s_touch_zone_right);
     lv_obj_move_foreground(s_touch_zone_top);
+    lv_obj_move_foreground(s_touch_zone_top_right);
 }
 
 } // namespace
@@ -1594,6 +1659,10 @@ void display_toggle_info_overlay() {
     } else {
         lv_obj_add_flag(s_info_overlay, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+bool display_radar_visible() {
+    return s_radar_canvas != nullptr;
 }
 
 void display_update_clock(const char *time_text) {

@@ -52,6 +52,7 @@ void display_render_frame(uint8_t frame, const FlightStats &stats);
 void display_update_clock(const char *time_text);
 void display_debug_line(const String &line);
 void display_toggle_info_overlay();
+bool display_radar_visible();
 
 // Touch tap-zone callbacks, invoked from the LVGL event handlers registered
 // inside display.cpp. Implemented in main.cpp.
@@ -60,4 +61,6 @@ void onTouchRotateBrightness();
 void onTouchTriggerFetch();
 void onTouchToggleSysInfo();
 void onTouchToggleInfoOverlay();
+void onTouchToggleWeather();
+void onRadarSelectionChanged();
 void onTouchReboot();

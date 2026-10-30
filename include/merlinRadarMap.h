@@ -44,8 +44,8 @@ constexpr int RADAR_OUTER_RADIUS_PX = MAP_SIZE_PX / 2 - 30; // mirrors radar_out
 
 // Bump this name when the map rendering changes so an old cache cannot hide
 // an updated style after a firmware upload.
-constexpr const char *CACHE_PATH = "/radarmap-v5.jpg";
-constexpr const char *CACHE_TEMP_PATH = "/radarmap-v5.tmp";
+constexpr const char *CACHE_PATH = "/radarmap-v6.jpg";
+constexpr const char *CACHE_TEMP_PATH = "/radarmap-v6.tmp";
 constexpr const char *ARCGIS_HOST = "services.arcgisonline.com";
 constexpr const char *ARCGIS_FALLBACK_HOST = "server.arcgisonline.com";
 constexpr const char *GEOAPIFY_HOST = "maps.geoapify.com";
@@ -238,12 +238,16 @@ inline bool fetch_and_cache() {
         hosts = geoapify_hosts;
         host_count = sizeof(geoapify_hosts) / sizeof(geoapify_hosts[0]);
     } else {
+        // The bbox is in Web Mercator metres, which stretch ground distance
+        // by 1/cos(lat); without this the map came out zoomed in relative to
+        // the aircraft plot (and the weather overlay).
+        double merc_half_m = range_m / cos(radians(myLat));
         snprintf(pathBuf, sizeof(pathBuf),
                  "/arcgis/rest/services/%s/MapServer/export"
                  "?bbox=%.1f,%.1f,%.1f,%.1f&bboxSR=102100&imageSR=102100"
                  "&size=%d,%d&format=jpg&transparent=false&f=image",
                  style_path(s_style),
-                 x - range_m, y - range_m, x + range_m, y + range_m,
+                 x - merc_half_m, y - merc_half_m, x + merc_half_m, y + merc_half_m,
                  MAP_SIZE_PX, MAP_SIZE_PX);
     }
 
@@ -285,9 +289,25 @@ inline bool fetch_and_cache() {
             client.stop();
             continue;
         }
-        while (client.connected()) {
+        // Skip headers, noting Content-Length so a short body is rejected
+        // rather than cached. An empty line means a read timeout, not the
+        // end of headers ("\r").
+        long content_length = -1;
+        bool headers_done = false;
+        for (;;) {
             String line = client.readStringUntil('\n');
-            if (line == "\r") break;
+            if (line == "\r") {
+                headers_done = true;
+                break;
+            }
+            if (line.length() == 0) break;
+            line.toLowerCase();
+            if (line.startsWith("content-length:")) content_length = line.substring(15).toInt();
+        }
+        if (!headers_done) {
+            DEBUG_PRINTLN("radarmap: timed out reading headers");
+            client.stop();
+            continue;
         }
 
         SPIFFS.remove(CACHE_TEMP_PATH);
@@ -298,25 +318,44 @@ inline bool fetch_and_cache() {
             return false;
         }
 
+        // client.read() returns -1 (and closes the connection) on a TLS
+        // error, so keep it signed; stop at Content-Length or a 30s deadline.
         uint8_t buf[512];
         size_t total = 0;
-        while (client.connected() || client.available()) {
-            size_t n = client.available();
-            if (n > 0) {
-                size_t toRead = n > sizeof(buf) ? sizeof(buf) : n;
-                size_t got = client.read(buf, toRead);
-                f.write(buf, got);
-                total += got;
-            } else if (!client.connected()) {
+        bool write_ok = true;
+        unsigned long body_start = millis();
+        while (content_length < 0 || total < (size_t)content_length) {
+            if (millis() - body_start > 30000) {
+                DEBUG_PRINTLN("radarmap: body read timeout");
                 break;
-            } else {
-                delay(1);
             }
+            int avail = client.available();
+            if (avail <= 0) {
+                if (!client.connected()) break;
+                delay(1);
+                continue;
+            }
+            int got = client.read(buf, avail > (int)sizeof(buf) ? sizeof(buf) : (size_t)avail);
+            if (got <= 0) continue;
+            if (f.write(buf, got) != (size_t)got) {
+                write_ok = false;
+                break;
+            }
+            total += got;
         }
         f.close();
         client.stop();
 
-        if (total > 0) {
+        bool complete = write_ok && total > 0 &&
+                        (content_length < 0 || total == (size_t)content_length);
+        if (!complete) {
+            DEBUG_PRINTLN("radarmap: incomplete download: " + String(total) + " of " +
+                          String(content_length) + " bytes" +
+                          (write_ok ? "" : " (SPIFFS write failed, free: " +
+                                           String(SPIFFS.totalBytes() - SPIFFS.usedBytes()) + ")"));
+        }
+
+        if (complete) {
             bool cache_removed = !SPIFFS.exists(CACHE_PATH) || SPIFFS.remove(CACHE_PATH);
             if (cache_removed && SPIFFS.rename(CACHE_TEMP_PATH, CACHE_PATH)) {
                 DEBUG_PRINTLN("radarmap: fetched " + String(total) + " bytes");

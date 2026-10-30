@@ -19,6 +19,7 @@
 
 #include "merlinFlightStats.h"
 #include "merlinRadarMap.h"
+#include "merlinWeatherRadar.h"
 
 #include "display.h"
 
@@ -42,7 +43,8 @@ boolean _forceRender = false;
 boolean _mapSettingsChanged = false; // set by parseConfigValue when a mapstyle/maprange/mapenabled change needs a re-fetch
 
 /* frames */
-byte _currentFrame = FRAME_TOPSTATS;
+byte _currentFrame = FRAME_TOPSTATS; // the frame currently on screen
+boolean _advanceRequested = false;   // user asked for the next frame (touch)
 #define MAXRENDER_EMERGENCIES 4
 
 volatile bool _spritesNeedUpdate = false; // set by fetchTask after data swap; consumed by loop()
@@ -571,6 +573,7 @@ void toggleSysInfoFrame()
   DEBUG_PRINTLN("toggleSysInfoFrame");
   _currentFrame = (_currentFrame == FRAME_SYSINFO ? FRAME_TOPSTATS : FRAME_SYSINFO);
   _forceRender = true;
+  _runFrame = millis(); // give the chosen frame its full interval
 }
 
 void rotateBrightness()
@@ -582,7 +585,7 @@ void rotateBrightness()
 void advanceFrame()
 {
   DEBUG_PRINTLN("advanceFrame");
-  _forceRender = true;
+  _advanceRequested = true;
 }
 
 void triggerFetchFromButton()
@@ -595,11 +598,24 @@ void triggerFetchFromButton()
   }
 }
 
+void toggleWeatherOverlay()
+{
+  weatherradar::s_enabled = !weatherradar::s_enabled;
+  DEBUG_PRINTLN("toggleWeatherOverlay: " + String(weatherradar::s_enabled ? "on" : "off"));
+  if (weatherradar::needs_refresh())
+  {
+    triggerFetchFromButton(); // fetchTask refreshes the weather after the flight data
+  }
+  _forceRender = true; // redraw the radar in place to update the overlay + icon
+}
+
 void onTouchAdvanceFrame() { advanceFrame(); }
 void onTouchRotateBrightness() { rotateBrightness(); }
 void onTouchTriggerFetch() { triggerFetchFromButton(); }
 void onTouchToggleSysInfo() { toggleSysInfoFrame(); }
 void onTouchToggleInfoOverlay() { display_toggle_info_overlay(); }
+void onTouchToggleWeather() { toggleWeatherOverlay(); }
+void onRadarSelectionChanged() { _forceRender = true; } // redraw the radar in place
 void onTouchReboot() { rebootESP(); }
 
 void setupWifi()
@@ -664,6 +680,11 @@ void fetchTask(void *pvParameters)
     else
     {
       DEBUG_PRINTLN("fetchTask: fetchFlightData failed, keeping previous data");
+    }
+
+    if (weatherradar::needs_refresh() && weatherradar::refresh(_flightStatsMutex))
+    {
+      _spritesNeedUpdate = true; // redraw the current frame with the new overlay
     }
 
     _fetchInProgress = false;
@@ -793,8 +814,7 @@ void loop()
       _forceUpdate = false;
     }
 
-    bool dataUpdated = _spritesNeedUpdate;
-    if (dataUpdated)
+    if (_spritesNeedUpdate)
     {
       _spritesNeedUpdate = false;
       _forceRender = true; // re-render current frame with the new data
@@ -811,35 +831,40 @@ void loop()
       }
     }
 
+    // _currentFrame is the frame on screen. Data updates and other forced
+    // renders redraw it in place; only its dwell elapsing (or a touch
+    // advance) moves the carousel on, so the radar keeps its full dwell.
     unsigned long frameInterval = (_currentFrame == FRAME_RADAR)
       ? _radarDwellMillis
       : UPDATE_UI_FRAME_INTERVAL_MILLISECS;
 
     bool frameElapsed = _runCurrent - _runFrame >= frameInterval;
-    if (frameElapsed || _forceUpdate || _forceRender)
+    if (frameElapsed || _advanceRequested || _forceUpdate || _forceRender)
     {
-      DEBUG_PRINTLN("Current Frame: " + String(_currentFrame));
-
       xSemaphoreTake(_flightStatsMutex, portMAX_DELAY);
 
-      display_render_frame(_currentFrame, _flightStats);
-
-        if (_flightStats.totalAircraft > 0 &&
-          (_currentFrame != FRAME_RADAR || frameElapsed || !dataUpdated))
+      // An emergency slot whose aircraft has dropped out would render blank.
+      bool emergencyFrameGone = _currentFrame >= FRAME_EMERGENCY_BASE &&
+                                _currentFrame >= FRAME_EMERGENCY_BASE + _flightStats.emergencyCount;
+      bool advance = emergencyFrameGone ||
+                     ((frameElapsed || _advanceRequested) && _flightStats.totalAircraft > 0);
+      if (advance)
       {
         advanceToNextEnabledFrame(_flightStats.emergencyCount);
       }
 
+      DEBUG_PRINTLN("Current Frame: " + String(_currentFrame));
+      display_render_frame(_currentFrame, _flightStats);
+
       xSemaphoreGive(_flightStatsMutex);
 
-      _forceUpdate = false;
-      _forceRender = false;
-      // Fresh radar data redraws the existing canvas but must not shorten its
-      // dwell period. User-forced renders keep their existing advance behavior.
-      if (frameElapsed || !dataUpdated)
+      if (advance || frameElapsed)
       {
         _runFrame = millis();
       }
+      _advanceRequested = false;
+      _forceUpdate = false;
+      _forceRender = false;
     }
 
     if (_runCurrent - _runTime >= UPDATE_TIME_INTERVAL_MILLISECS)
